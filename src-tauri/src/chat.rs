@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::db::{Chat, Message, Project};
 use crate::llm::{self, Delta, StreamResult};
 use crate::prompts;
-use crate::state::AppState;
+use crate::state::{AppState, DEFAULT_TITLES};
 use crate::tools::{self, ToolCtx};
 
 pub fn emit(app: &AppHandle, chat_id: &str, kind: &str, mut payload: Value) {
@@ -21,9 +21,14 @@ pub fn emit(app: &AppHandle, chat_id: &str, kind: &str, mut payload: Value) {
     let _ = app.emit("chat-event", payload);
 }
 
+/// Today's date (UTC) as YYYY-MM-DD.
 pub fn today() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
-    let z = secs / 86400 + 719468;
+    ymd(crate::state::now_ms() / 1000)
+}
+
+/// Unix seconds → YYYY-MM-DD (UTC), using the civil-from-days algorithm.
+pub fn ymd(secs: i64) -> String {
+    let z = secs.div_euclid(86400) + 719468;
     let era = z.div_euclid(146097);
     let doe = z - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
@@ -42,8 +47,12 @@ pub fn budget(state: &AppState, chat: &Chat) -> u32 {
 }
 
 pub fn system_prompt(state: &AppState, chat: &Chat, project: Option<&Project>, web: bool) -> String {
-    let lang = state.settings.read().reply_lang.clone();
+    let (lang, custom) = {
+        let s = state.settings.read();
+        (s.reply_lang.clone(), s.custom_instructions.clone())
+    };
     let mut sys = prompts::base(&lang, &today());
+    sys.push_str(&prompts::custom_instructions(&custom));
     if web {
         sys.push_str(prompts::WEB_TOOLS);
     }
@@ -81,7 +90,7 @@ pub fn build_messages(state: &AppState, chat: &Chat, project: Option<&Project>, 
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter(|t| t["id"].as_str().map_or(false, |id| answered.contains(id)))
+                    .filter(|t| t["id"].as_str().is_some_and(|id| answered.contains(id)))
                     .map(|t| json!({"id": t["id"], "type": "function", "function": {"name": t["name"], "arguments": t["arguments"]}}))
                     .collect();
                 if m.content.is_empty() && calls.is_empty() {
@@ -129,10 +138,7 @@ pub async fn send(app: AppHandle, opts: SendOpts) -> Result<()> {
         return Err(anyhow!("No model is loaded yet. Open Models and load one."));
     }
     let chat = state.db.chat(&opts.chat_id)?.ok_or_else(|| anyhow!("chat not found"))?;
-    let project = match &chat.project_id {
-        Some(pid) => state.db.project(pid)?,
-        None => None,
-    };
+    let project = state.db.chat_project(&chat)?;
     let cancel = register_cancel(&state, &chat.id);
     emit(&app, &chat.id, "busy", json!({"busy": true}));
 
@@ -179,7 +185,7 @@ pub async fn send(app: AppHandle, opts: SendOpts) -> Result<()> {
     // follow-ups: title + compression (only if not cancelled)
     if !cancel.load(Ordering::Relaxed) {
         if let Ok(Some(c)) = state.db.chat(&chat.id) {
-            if c.title == "New chat" || c.title == "Chat nou" {
+            if DEFAULT_TITLES.contains(&c.title.as_str()) {
                 let _ = make_title(&app, &c).await;
             }
             let c = state.db.chat(&chat.id)?.unwrap_or(c);
@@ -279,7 +285,7 @@ pub async fn stream_assistant(
 pub fn gen_params(state: &AppState, think: bool) -> Value {
     let s = state.settings.read();
     json!({
-        "temperature": if think { s.temperature.min(0.7).max(0.5) } else { s.temperature },
+        "temperature": if think { s.temperature.clamp(0.5, 0.7) } else { s.temperature },
         "top_p": s.top_p,
         "top_k": 20,
         "min_p": 0.0,
@@ -458,10 +464,7 @@ pub async fn compress(app: &AppHandle, chat_id: &str, cancel: &AtomicBool) -> Re
     state.db.mark_compressed(chat_id, keep_from)?;
     // estimate the new prompt size
     let chat2 = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat not found"))?;
-    let project = match &chat2.project_id {
-        Some(p) => state.db.project(p)?,
-        None => None,
-    };
+    let project = state.db.chat_project(&chat2)?;
     let msgs = build_messages(&state, &chat2, project.as_ref(), false)?;
     let after = llm::estimate_tokens(&serde_json::to_string(&msgs)?);
     state.db.set_chat_ctx(chat_id, after)?;
@@ -470,6 +473,41 @@ pub async fn compress(app: &AppHandle, chat_id: &str, cancel: &AtomicBool) -> Re
     emit(app, chat_id, "message_update", json!({"message": {"id": ev.id, "meta": meta}}));
     emit(app, chat_id, "compressed", json!({"upto_seq": keep_from, "ctx_used": after, "ctx_budget": budget(&state, &chat2)}));
     Ok(())
+}
+
+/// The whole conversation (compressed messages included) as a Markdown document.
+pub fn export_markdown(chat: &Chat, messages: &[Message]) -> String {
+    let mut out = format!("# {}\n\n_Exported from Lumen · {}_\n", chat.title, ymd(chat.created / 1000));
+    for m in messages {
+        match m.role.as_str() {
+            "user" => {
+                out.push_str("\n## You\n\n");
+                out.push_str(m.content.trim());
+                out.push('\n');
+            }
+            "assistant" => {
+                if m.content.trim().is_empty() {
+                    continue;
+                }
+                out.push_str("\n## Lumen\n\n");
+                if !m.reasoning.trim().is_empty() {
+                    out.push_str("<details><summary>Reasoning</summary>\n\n");
+                    out.push_str(m.reasoning.trim());
+                    out.push_str("\n\n</details>\n\n");
+                }
+                out.push_str(m.content.trim());
+                out.push('\n');
+            }
+            "tool" => {
+                let name = m.meta["name"].as_str().unwrap_or("tool");
+                let args: Value = serde_json::from_str(m.meta["arguments"].as_str().unwrap_or("{}")).unwrap_or_default();
+                let arg = ["path", "query", "url"].iter().find_map(|k| args[*k].as_str()).unwrap_or("");
+                out.push_str(&format!("\n> Tool `{name}` {arg}\n"));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Manual compression triggered from the UI.

@@ -9,6 +9,22 @@ tags it so GitHub Actions builds and publishes the release.
 
 ### Added
 - LICENSE: source-available terms (run releases and modify privately; no redistribution or commercial use).
+- Export a chat as Markdown (chat menu or Ctrl+Shift+E), including reasoning and tool calls.
+- Sidebar search also finds chats by what was said in them, not only by title.
+- Custom instructions (Settings → Chat): always-on guidance added to every chat's system prompt.
+- Unsent text is kept per chat when switching between chats.
+- "Jump to latest" button when you scroll up in a long chat.
+- Keyboard shortcuts: Ctrl+K (search), Ctrl+, (settings), Esc closes menus and dialogs before it stops a
+  generation, Enter confirms dialogs. All shortcuts are listed in Settings.
+- Message timestamps on hover.
+
+### Changed
+- Remaining hard-coded English UI strings (settings sections, status bar tooltips, model list) are translated.
+- The Wikipedia User-Agent now reports the real app version.
+
+### Removed
+- Internal cleanup: unused `once_cell` dependency, unused catalog/state fields, duplicated server-spawn,
+  log, row-mapping and UI helpers; project deletion now runs in a single transaction. Clippy is warning-free.
 
 ## [0.2.1] - 2026-11-03
 ### Added

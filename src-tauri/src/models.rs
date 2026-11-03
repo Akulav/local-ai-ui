@@ -21,8 +21,6 @@ pub struct CatalogEntry {
     pub desc_en: &'static str,
     pub desc_ro: &'static str,
     pub recommended: bool,
-    /// suggested --n-cpu-moe for 16 GB cards (MoE models only)
-    pub n_cpu_moe: u32,
 }
 
 /// Curated for a 16 GB AMD card (RX 9070 XT) + 32 GB RAM.
@@ -38,7 +36,6 @@ pub fn catalog() -> Vec<CatalogEntry> {
             desc_en: "Top quality that fits fully in the 9070 XT's VRAM. Strong reasoning, coding, English & Romanian.",
             desc_ro: "Cea mai bună calitate care încape complet în VRAM-ul 9070 XT. Raționament, cod, engleză și română.",
             recommended: true,
-            n_cpu_moe: 0,
         },
         CatalogEntry {
             id: "qwen38-27b-q3kxl",
@@ -50,7 +47,6 @@ pub fn catalog() -> Vec<CatalogEntry> {
             desc_en: "Slightly smaller quant – leaves more VRAM for a longer context window.",
             desc_ro: "Cuantizare puțin mai mică – lasă mai mult VRAM pentru un context mai lung.",
             recommended: false,
-            n_cpu_moe: 0,
         },
         CatalogEntry {
             id: "qwen38-27b-q4kxl",
@@ -62,7 +58,6 @@ pub fn catalog() -> Vec<CatalogEntry> {
             desc_en: "Higher quality; a few layers spill into system RAM, so it is noticeably slower.",
             desc_ro: "Calitate mai mare; câteva straturi trec în RAM, deci e vizibil mai lent.",
             recommended: false,
-            n_cpu_moe: 0,
         },
         CatalogEntry {
             id: "qwen36-35b-a3b-iq3s",
@@ -74,7 +69,6 @@ pub fn catalog() -> Vec<CatalogEntry> {
             desc_en: "Mixture-of-experts with only 3B active parameters – very high tokens/s, fully in VRAM.",
             desc_ro: "Mixture-of-experts cu doar 3B parametri activi – foarte rapid, complet în VRAM.",
             recommended: false,
-            n_cpu_moe: 0,
         },
         CatalogEntry {
             id: "qwen36-35b-a3b-q4km",
@@ -86,7 +80,6 @@ pub fn catalog() -> Vec<CatalogEntry> {
             desc_en: "Better MoE quant; some experts live in system RAM (auto-fitted). Still fast.",
             desc_ro: "Cuantizare MoE mai bună; o parte din experți stau în RAM (ajustat automat). Tot rapid.",
             recommended: false,
-            n_cpu_moe: 0,
         },
         CatalogEntry {
             id: "qwen35-9b-q4km",
@@ -98,7 +91,6 @@ pub fn catalog() -> Vec<CatalogEntry> {
             desc_en: "Small and snappy. Huge context window, leaves room for games/other apps.",
             desc_ro: "Mic și rapid. Context foarte mare, lasă loc pentru alte aplicații.",
             recommended: false,
-            n_cpu_moe: 0,
         },
     ]
 }
@@ -136,7 +128,7 @@ pub fn local_models(state: &AppState) -> Vec<LocalModel> {
             });
         }
     }
-    v.sort_by(|a, b| b.modified.cmp(&a.modified));
+    v.sort_by_key(|m| std::cmp::Reverse(m.modified));
     v
 }
 
@@ -159,12 +151,17 @@ pub async fn delete_model(app: &AppHandle, file: &str) -> Result<()> {
     }
     let p = state.paths.models.join(&name);
     tokio::fs::remove_file(&p).await?;
-    let mut s = state.settings.write();
-    if s.last_model.as_deref() == Some(name.as_str()) {
-        s.last_model = None;
+    let cleared = {
+        let mut s = state.settings.write();
+        let hit = s.last_model.as_deref() == Some(name.as_str());
+        if hit {
+            s.last_model = None;
+        }
+        hit
+    };
+    if cleared {
+        state.save_settings();
     }
-    drop(s);
-    state.save_settings();
     Ok(())
 }
 

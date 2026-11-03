@@ -70,6 +70,8 @@ fn main() {
             commands::get_logs,
             commands::list_chats,
             commands::create_chat,
+            commands::search_chats,
+            commands::export_chat,
             commands::get_chat,
             commands::rename_chat,
             commands::pin_chat,

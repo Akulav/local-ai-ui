@@ -135,7 +135,7 @@ pub fn tree(folder: &Path, sub: &str, depth: usize, max_entries: usize) -> Strin
     for e in walker.flatten().skip(1) {
         let d = e.depth();
         let name = e.file_name().to_string_lossy();
-        let is_dir = e.file_type().map_or(false, |t| t.is_dir());
+        let is_dir = e.file_type().is_some_and(|t| t.is_dir());
         lines.push(format!("{}{}{}", "  ".repeat(d.saturating_sub(1)), name, if is_dir { "/" } else { "" }));
         if lines.len() >= max_entries {
             lines.push("… (truncated)".into());

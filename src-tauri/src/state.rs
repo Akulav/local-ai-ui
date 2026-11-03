@@ -83,6 +83,8 @@ pub struct Settings {
     pub search_provider: String,
     pub search_key: String,
     pub searxng_url: String,
+    /// Always-on guidance from the user, appended to every chat's system prompt.
+    pub custom_instructions: String,
 }
 
 impl Default for Settings {
@@ -105,6 +107,7 @@ impl Default for Settings {
             search_provider: "wikipedia".into(),
             search_key: String::new(),
             searxng_url: String::new(),
+            custom_instructions: String::new(),
         }
     }
 }
@@ -130,7 +133,6 @@ pub struct AppState {
     pub llm: tokio::sync::Mutex<Option<ServerProc>>,
     pub embed: tokio::sync::Mutex<Option<ServerProc>>,
     pub info: RwLock<LlmInfo>,
-    pub embed_port: RwLock<u16>,
     pub downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub generations: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub indexes: Mutex<HashMap<String, Arc<ProjectIndex>>>,
@@ -159,7 +161,6 @@ impl AppState {
             llm: tokio::sync::Mutex::new(None),
             embed: tokio::sync::Mutex::new(None),
             info: RwLock::new(LlmInfo { state: "stopped".into(), ..Default::default() }),
-            embed_port: RwLock::new(0),
             downloads: Mutex::new(HashMap::new()),
             generations: Mutex::new(HashMap::new()),
             indexes: Mutex::new(HashMap::new()),
@@ -185,14 +186,41 @@ impl AppState {
     }
 
     pub fn log(&self, line: impl Into<String>) {
-        let mut l = self.logs.lock();
-        l.push(line.into());
-        if l.len() > 600 {
-            let n = l.len() - 600;
-            l.drain(0..n);
-        }
+        push_log(&self.logs, line.into());
     }
 }
+
+/// Lines kept in the in-memory log shown under Settings → Server logs.
+const MAX_LOG_LINES: usize = 600;
+
+/// Appends a line to the shared log ring (also used by the llama-server output readers).
+pub fn push_log(logs: &Mutex<Vec<String>>, line: String) {
+    let mut l = logs.lock();
+    l.push(line);
+    if l.len() > MAX_LOG_LINES {
+        let n = l.len() - MAX_LOG_LINES;
+        l.drain(0..n);
+    }
+}
+
+/// Default title of a fresh chat; titles still equal to one of these get auto-named after the first turn.
+pub const DEFAULT_TITLES: [&str; 2] = ["New chat", "Chat nou"];
+
+pub fn default_title(ui_lang: &str) -> &'static str {
+    if ui_lang == "ro" { DEFAULT_TITLES[1] } else { DEFAULT_TITLES[0] }
+}
+
+/// Modification time of a file in Unix seconds (0 when unknown).
+pub fn mtime_secs(md: &std::fs::Metadata) -> i64 {
+    md.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Honest User-Agent for services whose API etiquette asks for one (Wikipedia).
+pub const LUMEN_UA: &str = concat!("Lumen/", env!("CARGO_PKG_VERSION"), " (local desktop AI assistant; llama.cpp)");
 
 fn load_settings(paths: &Paths) -> Settings {
     std::fs::read_to_string(paths.data.join("settings.json"))

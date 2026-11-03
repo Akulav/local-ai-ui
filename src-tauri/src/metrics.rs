@@ -37,7 +37,7 @@ pub fn spawn(app: AppHandle) {
                     // wildcard instances may not exist yet when the query was created; rebuild periodically
                     if d == 0 {
                         empty_samples += 1;
-                        if empty_samples % 5 == 0 {
+                        if empty_samples.is_multiple_of(5) {
                             counter = GpuMemCounter::new(pid);
                         }
                     }

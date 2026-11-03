@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::extract;
-use crate::state::AppState;
+use crate::state::{mtime_secs, AppState};
 
 const STOP: &[&str] = &[
     "the", "an", "and", "or", "of", "to", "in", "is", "are", "for", "on", "with", "as", "at", "by", "it", "this",
@@ -38,7 +38,10 @@ pub fn tokenize(s: &str) -> Vec<String> {
         let mut cur = String::new();
         let chars: Vec<char> = word.chars().collect();
         for (i, &c) in chars.iter().enumerate() {
-            let boundary = i > 0 && c.is_uppercase() && (chars[i - 1].is_lowercase() || chars.get(i + 1).map_or(false, |n| n.is_lowercase()) && chars[i - 1].is_uppercase());
+            // fooBar → foo|Bar, HTTPServer → HTTP|Server
+            let boundary = i > 0
+                && c.is_uppercase()
+                && (chars[i - 1].is_lowercase() || chars.get(i + 1).is_some_and(|n| n.is_lowercase()) && chars[i - 1].is_uppercase());
             if boundary && !cur.is_empty() {
                 parts.push(std::mem::take(&mut cur));
             }
@@ -199,7 +202,7 @@ fn emb_to_blob(v: &[f32]) -> Vec<u8> {
 }
 
 fn blob_to_emb(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 pub fn load_index(state: &AppState, project_id: &str) -> Result<Arc<ProjectIndex>> {
@@ -285,11 +288,11 @@ pub fn walk(folder: &Path) -> Vec<(String, i64, u64)> {
         .git_ignore(true)
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
-            !(e.file_type().map_or(false, |t| t.is_dir()) && SKIP_DIRS.contains(&name.as_ref()))
+            !(e.file_type().is_some_and(|t| t.is_dir()) && SKIP_DIRS.contains(&name.as_ref()))
         })
         .build();
     for e in walker.flatten() {
-        if !e.file_type().map_or(false, |t| t.is_file()) {
+        if !e.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
         let p = e.path();
@@ -302,14 +305,8 @@ pub fn walk(folder: &Path) -> Vec<(String, i64, u64)> {
         if md.len() > limit {
             continue;
         }
-        let mtime = md
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         if let Ok(rel) = p.strip_prefix(folder) {
-            out.push((rel.to_string_lossy().replace('\\', "/"), mtime, md.len()));
+            out.push((rel.to_string_lossy().replace('\\', "/"), mtime_secs(&md), md.len()));
         }
         if out.len() >= 25000 {
             break;
@@ -449,13 +446,8 @@ pub async fn refresh_file(app: &AppHandle, pid: &str, folder: &Path, rel: &str) 
     let state = app.state::<Arc<AppState>>().inner().clone();
     let full = folder.join(rel);
     let Ok(md) = std::fs::metadata(&full) else { return };
-    let mtime = md
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    index_file(&state, pid, folder, rel, mtime, md.len()).await;
+    index_file(&state, pid, folder, rel, mtime_secs(&md), md.len()).await;
+    // drop the cached index now (lexical search sees the new text) and again once vectors exist
     state.indexes.lock().remove(pid);
     let cancel = AtomicBool::new(false);
     if state.settings.read().semantic_search {

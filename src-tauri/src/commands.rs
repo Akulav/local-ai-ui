@@ -8,7 +8,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::chat::{self, SendOpts};
-use crate::state::{AppState, Settings};
+use crate::state::{default_title, AppState, Settings};
 use crate::{models, rag, runtime, server, tools};
 
 type S<'a> = State<'a, Arc<AppState>>;
@@ -70,7 +70,6 @@ pub async fn search_hf(state: S<'_>, query: String) -> R<Value> {
 
 #[tauri::command]
 pub async fn load_model(app: AppHandle, file: String) -> R<()> {
-    // apply catalog hints (MoE offload) when the user has not set their own
     server::start_llm(&app, &file).await.map_err(e)
 }
 
@@ -84,8 +83,9 @@ pub async fn update_runtime(app: AppHandle) -> R<String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let backend = state.settings.read().backend.clone();
     let model = state.info.read().model.clone();
+    // the runtime folder is replaced, so both servers must release their exe first
     server::stop_all(&app).await;
-    server::stop_llm(&app).await;
+    server::stop_llm(&app).await; // resets the status shown in the UI
     runtime::ensure(&app, &backend, true).await.map_err(e)?;
     if let Some(m) = model {
         let app2 = app.clone();
@@ -110,8 +110,45 @@ pub fn list_chats(state: S, project_id: Option<String>) -> R<Value> {
 
 #[tauri::command]
 pub fn create_chat(state: S, project_id: Option<String>) -> R<Value> {
-    let title = if state.settings.read().ui_lang == "ro" { "Chat nou" } else { "New chat" };
+    let title = default_title(&state.settings.read().ui_lang);
     state.db.create_chat(project_id.as_deref(), title).map(|c| json!(c)).map_err(e)
+}
+
+/// Ids of chats whose messages contain `query` (the sidebar search also matches titles itself).
+#[tauri::command]
+pub fn search_chats(state: S, query: String) -> R<Vec<String>> {
+    let q = query.trim();
+    if q.chars().count() < 2 {
+        return Ok(vec![]);
+    }
+    state.db.search_chats(q).map_err(e)
+}
+
+/// Asks where to save, then writes the chat as Markdown. Returns the saved path (None if cancelled).
+#[tauri::command]
+pub async fn export_chat(app: AppHandle, id: String) -> R<Option<String>> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let chat = state.db.chat(&id).map_err(e)?.ok_or("chat not found")?;
+    let md = chat::export_markdown(&chat, &state.db.messages(&id).map_err(e)?);
+    let name: String = chat
+        .title
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let name = if name.is_empty() { "chat".to_string() } else { name };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(format!("{name}.md"))
+        .add_filter("Markdown", &["md"])
+        .save_file(move |f| {
+            let _ = tx.send(f.and_then(|p| p.into_path().ok()));
+        });
+    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
+    std::fs::write(&path, md).map_err(e)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]

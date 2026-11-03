@@ -1,14 +1,16 @@
-﻿
-//! Web search through official APIs (Brave, Tavily, SearXNG; Wikipedia as the keyless fallback)
+﻿//! Web search through official APIs (Brave, Tavily, SearXNG; Wikipedia as the keyless fallback)
 //! and readable page extraction.
 
 use anyhow::{anyhow, Result};
 use scraper::{ElementRef, Html, Node, Selector};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use crate::state::AppState;
+use crate::state::{AppState, LUMEN_UA};
+
+static TAG_RE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"<[^>]+>").unwrap());
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SearchHit {
@@ -51,8 +53,7 @@ fn hits(arr: Option<&Vec<Value>>, title: &str, url: &str, snippet: &str, n: usiz
 }
 
 fn strip_tags(s: &str) -> String {
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
-    re.replace_all(s, "").replace("&quot;", "\"").replace("&amp;", "&").replace("&#39;", "'")
+    TAG_RE.replace_all(s, "").replace("&quot;", "\"").replace("&amp;", "&").replace("&#39;", "'")
 }
 
 async fn brave(state: &AppState, key: &str, query: &str, n: usize) -> Result<Vec<SearchHit>> {
@@ -111,7 +112,7 @@ async fn wikipedia(state: &AppState, query: &str, n: usize) -> Result<Vec<Search
                 .http
                 .get(format!("https://{lang}.wikipedia.org/w/api.php"))
                 // Wikimedia API etiquette: identify the client honestly
-                .header("User-Agent", "Lumen/0.1 (local desktop AI assistant; llama.cpp)")
+                .header("User-Agent", LUMEN_UA)
                 .query(&[("action", "query"), ("list", "search"), ("srsearch", query), ("format", "json"), ("srlimit", &n.to_string())])
                 .timeout(Duration::from_secs(15))
                 .send()
@@ -154,7 +155,7 @@ pub async fn fetch(state: &AppState, url: &str) -> Result<Page> {
     }
     let mut req = state.http.get(url);
     if url.contains(".wikipedia.org/") {
-        req = req.header("User-Agent", "Lumen/0.1 (local desktop AI assistant; llama.cpp)");
+        req = req.header("User-Agent", LUMEN_UA);
     }
     let resp = req
         .header("Accept", "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8")

@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Result};
 use std::io::Read;
 use std::path::Path;
+use std::sync::LazyLock;
 
 pub const TEXT_EXT: &[&str] = &[
     "txt", "md", "markdown", "rst", "org", "tex", "csv", "tsv", "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg",
@@ -67,8 +68,8 @@ fn extract_docx(path: &Path) -> Result<String> {
     let mut xml = String::new();
     z.by_name("word/document.xml")?.read_to_string(&mut xml)?;
     let xml = xml.replace("</w:p>", "\n").replace("<w:tab/>", "\t").replace("<w:br/>", "\n");
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
-    let text = re.replace_all(&xml, "");
+    static TAG_RE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"<[^>]+>").unwrap());
+    let text = TAG_RE.replace_all(&xml, "");
     Ok(text
         .replace("&amp;", "&")
         .replace("&lt;", "<")

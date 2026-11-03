@@ -12,6 +12,9 @@ use crate::state::{new_id, now_ms};
 
 pub struct Db(pub Mutex<Connection>);
 
+/// Column list matching `Db::row_chat`.
+const CHAT_COLS: &str = "id,project_id,title,created,updated,ctx_limit,ctx_used,summary,pinned";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
@@ -101,12 +104,14 @@ impl Db {
         Ok(p)
     }
 
+    fn row_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
+        Ok(Project { id: r.get(0)?, name: r.get(1)?, folder: r.get(2)?, instructions: r.get(3)?, created: r.get(4)? })
+    }
+
     pub fn projects(&self) -> Result<Vec<Project>> {
         let c = self.0.lock();
         let mut st = c.prepare("SELECT id,name,folder,instructions,created FROM projects ORDER BY created DESC")?;
-        let rows = st.query_map([], |r| {
-            Ok(Project { id: r.get(0)?, name: r.get(1)?, folder: r.get(2)?, instructions: r.get(3)?, created: r.get(4)? })
-        })?;
+        let rows = st.query_map([], Self::row_project)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -114,10 +119,16 @@ impl Db {
         Ok(self
             .0
             .lock()
-            .query_row("SELECT id,name,folder,instructions,created FROM projects WHERE id=?1", [id], |r| {
-                Ok(Project { id: r.get(0)?, name: r.get(1)?, folder: r.get(2)?, instructions: r.get(3)?, created: r.get(4)? })
-            })
+            .query_row("SELECT id,name,folder,instructions,created FROM projects WHERE id=?1", [id], Self::row_project)
             .optional()?)
+    }
+
+    /// The project a chat belongs to (None for standalone chats).
+    pub fn chat_project(&self, chat: &Chat) -> Result<Option<Project>> {
+        match &chat.project_id {
+            Some(pid) => self.project(pid),
+            None => Ok(None),
+        }
     }
 
     pub fn update_project(&self, id: &str, name: &str, instructions: &str) -> Result<()> {
@@ -126,11 +137,13 @@ impl Db {
     }
 
     pub fn delete_project(&self, id: &str) -> Result<()> {
-        let c = self.0.lock();
-        c.execute("DELETE FROM chats WHERE project_id=?1", [id])?;
-        c.execute("DELETE FROM chunks WHERE project_id=?1", [id])?;
-        c.execute("DELETE FROM files WHERE project_id=?1", [id])?;
-        c.execute("DELETE FROM projects WHERE id=?1", [id])?;
+        let mut c = self.0.lock();
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM chats WHERE project_id=?1", [id])?; // messages cascade
+        tx.execute("DELETE FROM chunks WHERE project_id=?1", [id])?;
+        tx.execute("DELETE FROM files WHERE project_id=?1", [id])?;
+        tx.execute("DELETE FROM projects WHERE id=?1", [id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -169,34 +182,34 @@ impl Db {
         })
     }
 
+    /// Standalone chats (`None`) or the chats of one project, pinned first, then most recent.
     pub fn chats(&self, project_id: Option<&str>) -> Result<Vec<Chat>> {
         let c = self.0.lock();
-        let sql = "SELECT id,project_id,title,created,updated,ctx_limit,ctx_used,summary,pinned FROM chats";
-        let v = match project_id {
-            Some(p) => {
-                let mut st = c.prepare(&format!("{sql} WHERE project_id=?1 ORDER BY pinned DESC, updated DESC"))?;
-                let r = st.query_map([p], Self::row_chat)?.filter_map(|r| r.ok()).collect();
-                r
-            }
-            None => {
-                let mut st = c.prepare(&format!("{sql} WHERE project_id IS NULL ORDER BY pinned DESC, updated DESC"))?;
-                let r = st.query_map([], Self::row_chat)?.filter_map(|r| r.ok()).collect();
-                r
-            }
-        };
-        Ok(v)
+        // `project_id IS ?1` matches NULL for standalone chats and the id otherwise
+        let mut st = c.prepare(&format!("SELECT {CHAT_COLS} FROM chats WHERE project_id IS ?1 ORDER BY pinned DESC, updated DESC"))?;
+        let rows = st.query_map([project_id], Self::row_chat)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     pub fn chat(&self, id: &str) -> Result<Option<Chat>> {
         Ok(self
             .0
             .lock()
-            .query_row(
-                "SELECT id,project_id,title,created,updated,ctx_limit,ctx_used,summary,pinned FROM chats WHERE id=?1",
-                [id],
-                Self::row_chat,
-            )
+            .query_row(&format!("SELECT {CHAT_COLS} FROM chats WHERE id=?1"), [id], Self::row_chat)
             .optional()?)
+    }
+
+    /// Ids of chats whose messages contain `query` (case-insensitive for ASCII), most recent first.
+    pub fn search_chats(&self, query: &str) -> Result<Vec<String>> {
+        let pattern = format!("%{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let c = self.0.lock();
+        let mut st = c.prepare(
+            "SELECT c.id FROM chats c WHERE EXISTS (SELECT 1 FROM messages m WHERE m.chat_id=c.id
+               AND m.role IN ('user','assistant') AND m.content LIKE ?1 ESCAPE '\\')
+             ORDER BY c.updated DESC LIMIT 200",
+        )?;
+        let rows = st.query_map([pattern], |r| r.get(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     pub fn rename_chat(&self, id: &str, title: &str) -> Result<()> {

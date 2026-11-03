@@ -2369,7 +2369,6 @@ dependencies = [
  "anyhow",
  "futures-util",
  "ignore",
- "once_cell",
  "parking_lot",
  "pdf-extract",
  "regex",

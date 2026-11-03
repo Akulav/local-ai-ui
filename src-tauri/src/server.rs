@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
-use crate::state::AppState;
+use crate::state::{push_log, AppState};
 
 pub struct ServerProc {
     pub child: Child,
@@ -47,18 +47,26 @@ fn set_status(app: &AppHandle, f: impl FnOnce(&mut crate::state::LlmInfo)) {
     emit_status(app);
 }
 
+/// Spawns llama-server without a console window, tied to the app's job object, with piped output.
+fn spawn_server(state: &AppState, exe: &Path, args: &[String]) -> Result<(Child, u32)> {
+    let child = Command::new(exe)
+        .args(args)
+        .current_dir(exe.parent().unwrap_or(Path::new(".")))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .kill_on_drop(true)
+        .spawn()?;
+    let pid = child.id().unwrap_or(0);
+    state.job.adopt(pid);
+    Ok((child, pid))
+}
+
 fn spawn_logger(child: &mut Child, logs: Arc<Mutex<Vec<String>>>, tag: &'static str, progress: Option<AppHandle>) {
-    let push = move |logs: &Arc<Mutex<Vec<String>>>, line: String| {
-        let mut l = logs.lock();
-        l.push(format!("[{tag}] {line}"));
-        if l.len() > 600 {
-            let n = l.len() - 600;
-            l.drain(0..n);
-        }
-    };
+    let push = move |logs: &Mutex<Vec<String>>, line: String| push_log(logs, format!("[{tag}] {line}"));
     if let Some(out) = child.stdout.take() {
         let logs = logs.clone();
-        let push = push.clone();
         tokio::spawn(async move {
             let mut r = BufReader::new(out).lines();
             while let Ok(Some(line)) = r.next_line().await {
@@ -203,17 +211,7 @@ pub async fn start_llm(app: &AppHandle, model_file: &str) -> Result<()> {
         i.message = "Loading model into memory…".into();
     });
 
-    let mut child = Command::new(&exe)
-        .args(&args)
-        .current_dir(exe.parent().unwrap_or(Path::new(".")))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
-        .creation_flags(0x08000000)
-        .kill_on_drop(true)
-        .spawn()?;
-    let pid = child.id().unwrap_or(0);
-    state.job.adopt(pid);
+    let (mut child, pid) = spawn_server(&state, &exe, &args)?;
     spawn_logger(&mut child, state.logs.clone(), "llm", Some(app.clone()));
     set_status(app, |i| i.pid = pid);
 
@@ -280,28 +278,21 @@ pub async fn ensure_embed(app: &AppHandle) -> Result<u16> {
     let exe = crate::runtime::ensure(app, &backend, false).await?;
     let port = free_port();
     let threads = std::thread::available_parallelism().map(|n| (n.get() / 2).max(2)).unwrap_or(4);
-    let mut child = Command::new(&exe)
-        .args([
-            "-m", &model.to_string_lossy(),
-            "--host", "127.0.0.1", "--port", &port.to_string(),
-            "--embedding", "--pooling", "last",
-            "--ctx-size", "16384", "--parallel", "8", "--batch-size", "2048", "--ubatch-size", "2048",
-            "--device", "none", "--gpu-layers", "0", "--fit", "off",
-            "--threads", &threads.to_string(), "--no-webui",
-        ])
-        .current_dir(exe.parent().unwrap_or(Path::new(".")))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
-        .creation_flags(0x08000000)
-        .kill_on_drop(true)
-        .spawn()?;
-    let pid = child.id().unwrap_or(0);
-    state.job.adopt(pid);
+    let args: Vec<String> = [
+        "-m", &model.to_string_lossy(),
+        "--host", "127.0.0.1", "--port", &port.to_string(),
+        "--embedding", "--pooling", "last",
+        "--ctx-size", "16384", "--parallel", "8", "--batch-size", "2048", "--ubatch-size", "2048",
+        "--device", "none", "--gpu-layers", "0", "--fit", "off",
+        "--threads", &threads.to_string(), "--no-webui",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let (mut child, pid) = spawn_server(&state, &exe, &args)?;
     spawn_logger(&mut child, state.logs.clone(), "embed", None);
     wait_healthy(&state.http, port, &mut child, &state.logs).await?;
     *guard = Some(ServerProc { child, port, pid });
-    *state.embed_port.write() = port;
     Ok(port)
 }
 

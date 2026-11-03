@@ -239,7 +239,11 @@ a.chip:hover { border-color: var(--accent); color: var(--text); }
 .err-box { border: 1px solid rgba(255, 107, 129, 0.4); background: rgba(255, 107, 129, 0.08); color: #ffb3bf; padding: 10px 14px; border-radius: 12px; font-size: 13px; white-space: pre-wrap; }
 
 /* composer */
-.composer-wrap { padding: 0 28px 16px; }
+.composer-wrap { padding: 0 28px 16px; position: relative; }
+.jump-btn { position: absolute; left: 50%; top: -46px; transform: translate(-50%, 6px); display: flex; align-items: center; gap: 6px; padding: 6px 13px 6px 10px; border-radius: 30px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text-2); font-size: 12.5px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: opacity 0.15s, transform 0.15s; z-index: 5; }
+.jump-btn.on { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
+.jump-btn:hover { color: var(--text); border-color: var(--accent); }
+.jump-btn svg { width: 15px; height: 15px; }
 .composer { max-width: 860px; margin: 0 auto; background: var(--panel); border: 1px solid var(--line-2); border-radius: 18px; padding: 10px 12px 8px; box-shadow: 0 10px 34px rgba(0, 0, 0, 0.35); transition: border-color 0.15s; }
 .composer:focus-within { border-color: rgba(124, 108, 255, 0.6); box-shadow: 0 0 0 3px rgba(124, 108, 255, 0.12), 0 10px 34px rgba(0, 0, 0, 0.35); }
 .composer textarea { width: 100%; resize: none; border: 0; outline: none; background: transparent; min-height: 26px; max-height: 260px; padding: 4px 6px; line-height: 1.5; font-size: 14.5px; }
@@ -301,6 +305,11 @@ a.chip:hover { border-color: var(--accent); color: var(--text); }
 .field > div:first-child { flex: 1; }
 .field label { font-weight: 500; display: block; }
 .field small { color: var(--text-3); font-size: 12.5px; }
+.field.col { flex-direction: column; align-items: stretch; gap: 10px; }
+.field.col textarea.inp { min-height: 90px; }
+.shortcuts { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px 24px; font-size: 13px; color: var(--text-2); }
+.shortcuts div { display: flex; align-items: center; gap: 12px; }
+kbd { font-family: var(--mono); font-size: 11.5px; padding: 2px 7px; border-radius: 6px; border: 1px solid var(--line-2); border-bottom-width: 2px; background: var(--panel-2); color: var(--text); white-space: nowrap; min-width: 64px; text-align: center; }
 .inp, select.inp { background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 9px; padding: 8px 11px; outline: none; min-width: 200px; }
 .inp:focus { border-color: var(--accent); }
 textarea.inp { width: 100%; min-height: 110px; resize: vertical; }

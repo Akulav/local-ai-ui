@@ -26,6 +26,15 @@ Current date: {date}.
     )
 }
 
+/// The user's global custom instructions (Settings → Chat). Empty when none are set.
+pub fn custom_instructions(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    format!("\n\n# Custom instructions from the user\nFollow these unless a request explicitly overrides them.\n{text}")
+}
+
 pub const WEB_TOOLS: &str = r#"
 # Web access
 You can call `web_search` and `fetch_url` when the question needs current or niche information. Cite the sources you used as Markdown links. Do not search for things you already know well."#;

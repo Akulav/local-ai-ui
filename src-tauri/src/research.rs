@@ -12,7 +12,7 @@ use crate::chat::{emit, gen_params, stream_assistant, today};
 use crate::db::Message;
 use crate::llm;
 use crate::prompts;
-use crate::rag::{chunk, ProjectIndex, Chunk};
+use crate::rag::{chunk, Chunk, ProjectIndex};
 use crate::state::AppState;
 
 struct Card {
@@ -142,7 +142,7 @@ pub async fn run(app: &AppHandle, chat_id: &str, question: &str, think: bool, ca
         // 3. read pages concurrently
         card.step(app, &state, "read", &format!("Reading {} pages", picked.len()), base_p + 0.1);
         let st = state.clone();
-        let pages: Vec<(crate::web::SearchHit, Option<crate::web::Page>)> = stream::iter(picked.into_iter())
+        let pages: Vec<(crate::web::SearchHit, Option<crate::web::Page>)> = stream::iter(picked)
             .map(|h| {
                 let st = st.clone();
                 async move {

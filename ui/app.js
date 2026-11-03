@@ -68,8 +68,9 @@ const S = {
   settings: {}, info: { state: "stopped" }, catalog: [], root: "", runtime: null,
   tab: "chats", view: "chat", chatId: null, chat: null, messages: [], budget: 0, ctxUsed: 0,
   chats: [], projects: [], projectId: null, models: [], downloads: {}, metrics: {},
-  busy: {}, live: null, liveCtxBase: 0, showOld: false, filter: "",
+  busy: {}, live: null, liveCtxBase: 0, showOld: false, filter: "", searchHits: null,
   toggles: { think: true, web: false, research: false }, needsReload: false, lastTps: 0,
+  drafts: {}, // unsent composer text per chat id ("" = no chat yet)
 };
 /** Translate key `k` in the current UI language (falls back to English), filling {placeholders}. */
 const t = (k, vars) => {
@@ -91,8 +92,18 @@ function confirmBox(text, okLabel = "OK") {
   return new Promise((res) => {
     const m = el(`<div class="modal-bg"><div class="modal"><div>${esc(text)}</div><div class="acts"><button class="btn ghost" data-a="no">${t("cancel")}</button><button class="btn primary" data-a="yes">${esc(okLabel)}</button></div></div></div>`);
     m.addEventListener("click", (e) => { const a = e.target.closest("[data-a]")?.dataset.a; if (a || e.target === m) { m.remove(); res(a === "yes"); } });
+    m.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); m.remove(); res(true); } });
     document.body.appendChild(m);
+    m.querySelector('[data-a="yes"]').focus();
   });
+}
+/** Closes the top-most modal; returns true if there was one. */
+function closeTopModal() {
+  const m = $$(".modal-bg").pop();
+  if (!m) return false;
+  const cancel = m.querySelector('[data-a="no"], [data-a="c"]');
+  if (cancel) cancel.click(); else m.remove();
+  return true;
 }
 let openMenuEl = null;
 function popMenu(anchor, html, onClick) {
@@ -177,7 +188,8 @@ function renderSidebar() {
   const f = S.filter.toLowerCase();
   let html = "";
   if (S.tab === "chats") {
-    const chats = S.chats.filter((c) => !f || c.title.toLowerCase().includes(f));
+    // title match, or (from search_chats) a match inside the messages
+    const chats = S.chats.filter((c) => !f || c.title.toLowerCase().includes(f) || S.searchHits?.has(c.id));
     let last = null;
     for (const c of chats) {
       const g = c.pinned ? t("pinned") : dateGroup(c.updated);
@@ -208,10 +220,7 @@ $("#sideList").addEventListener("click", async (e) => {
     e.stopPropagation();
     const id = act.dataset.id;
     if (act.dataset.act === "delchat") {
-      if (!(await confirmBox(t("confirmDeleteChat"), t("del")))) return;
-      await call("delete_chat", { id });
-      if (S.chatId === id) { S.chatId = null; S.chat = null; S.messages = []; renderChat(); }
-      await refreshChats();
+      await deleteChat(id);
     } else if (act.dataset.act === "pin") {
       const c = S.chats.find((x) => x.id === id);
       await call("pin_chat", { id, pinned: !c?.pinned });
@@ -231,12 +240,40 @@ $("#sideList").addEventListener("click", async (e) => {
   if (p) return openProject(p.dataset.project);
 });
 $$(".tabs button").forEach((b) => b.addEventListener("click", () => { S.tab = b.dataset.tab; renderSidebar(); }));
-$("#searchInp").addEventListener("input", (e) => { S.filter = e.target.value; renderSidebar(); });
+let searchTimer = null;
+$("#searchInp").addEventListener("input", (e) => {
+  S.filter = e.target.value;
+  renderSidebar();
+  // also look inside messages (debounced; the title filter above is instant)
+  clearTimeout(searchTimer);
+  const q = S.filter.trim();
+  if (q.length < 2) { S.searchHits = null; return; }
+  searchTimer = setTimeout(async () => {
+    const ids = await invoke("search_chats", { query: q }).catch(() => []);
+    if (S.filter.trim() !== q) return; // a newer query is on its way
+    S.searchHits = new Set(ids);
+    renderSidebar();
+  }, 220);
+});
+$("#searchInp").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); e.target.value = ""; e.target.dispatchEvent(new Event("input")); e.target.blur(); } });
 $("#newBtn").addEventListener("click", () => (S.tab === "projects" ? newProjectModal() : newChat(null)));
 $("#navModels").addEventListener("click", () => showView("models"));
 $("#navSettings").addEventListener("click", () => showView("settings"));
 
 async function refreshChats() { S.chats = await call("list_chats", { projectId: null }); renderSidebar(); }
+/** Asks, deletes, and clears the view when the open chat was the one deleted. */
+async function deleteChat(id) {
+  if (!(await confirmBox(t("confirmDeleteChat"), t("del")))) return;
+  await call("delete_chat", { id });
+  delete S.drafts[id];
+  if (S.chatId === id) { S.chatId = null; S.chat = null; S.messages = []; input.value = ""; autosize(); renderChat(); }
+  await refreshChats();
+  refreshProjectChats();
+}
+async function exportChat() {
+  const path = await call("export_chat", { id: S.chatId });
+  if (path) toast(t("exported", { x: path }));
+}
 async function refreshProjects() { S.projects = await call("list_projects"); renderSidebar(); }
 
 // ---------------------------------------------------------------- views
@@ -254,10 +291,7 @@ function renderTopbar() {
   const tb = $("#topbar");
   if (S.view === "chat") {
     const proj = S.chat?.project_id ? S.projects.find((p) => p.id === S.chat.project_id) : null;
-    const used = S.live ? S.liveCtxBase + (S.live.tokens || 0) : S.ctxUsed;
-    const budget = S.budget || S.info.n_ctx || 0;
-    const pct = budget ? Math.min(100, (used / budget) * 100) : 0;
-    const mark = (S.settings.compress_at || 0.72) * 100;
+    const { used, budget, pct, mark } = ctxNumbers();
     tb.innerHTML = `
       ${proj ? `<div class="crumb" data-go-project="${proj.id}">${icon("folder")}${esc(proj.name)} /</div>` : ""}
       <div class="title" id="chatTitle" title="${t("rename")}">${esc(S.chat?.title || t("newChat"))}</div>
@@ -276,14 +310,19 @@ function renderTopbar() {
   }
   $("#modelPill")?.addEventListener("click", (e) => modelMenu(e.currentTarget));
 }
-function updateCtxMeter() {
-  if (S.view !== "chat" || !S.chat) return;
+/** Context meter values: tokens used (live while streaming), window size, fill % and compression mark %. */
+function ctxNumbers() {
   const used = S.live ? S.liveCtxBase + (S.live.tokens || 0) : S.ctxUsed;
   const budget = S.budget || S.info.n_ctx || 0;
   const pct = budget ? Math.min(100, (used / budget) * 100) : 0;
+  return { used, budget, pct, mark: (S.settings.compress_at || 0.72) * 100 };
+}
+function updateCtxMeter() {
+  if (S.view !== "chat" || !S.chat) return;
+  const { used, pct, mark } = ctxNumbers();
   const n = $("#ctxNum"), f = $("#ctxFill");
   if (n) n.textContent = fmtK(used);
-  if (f) { f.style.width = pct + "%"; f.classList.toggle("warn", pct > (S.settings.compress_at || 0.72) * 100); }
+  if (f) { f.style.width = pct + "%"; f.classList.toggle("warn", pct > mark); }
 }
 function shortModel(m) { return (m || "").replace(/\.gguf$/i, "").replace(/-UD-/, " ").replace(/-GGUF/i, ""); }
 function modelPill() {
@@ -299,28 +338,29 @@ async function modelMenu(anchor) {
   html += `<div class="sep"></div>`;
   if (S.info.state === "ready") html += `<button data-v="unload">${icon("power")}${t("unload")}</button>`;
   html += `<button data-v="manage">${icon("layers")}${t("models")}…</button>`;
-  popMenu(anchor, html, async (v) => {
+  popMenu(anchor, html, (v) => {
     if (v === "manage") return showView("models");
     if (v === "unload") return call("unload_model");
     if (v.startsWith("load:")) loadModel(v.slice(5));
   });
 }
-async function loadModel(file) {
+function loadModel(file) {
   S.needsReload = false;
   call("load_model", { file }).then(() => toast(`${shortModel(file)} · ${t("ready")}`)).catch(() => {});
 }
 function chatMenu(anchor) {
   const opts = [0, 8192, 16384, 32768, 65536, 131072];
   let html = `<button data-v="compress">${icon("compress")}${t("compressNow")}</button><div class="sep"></div><div class="lbl">${t("ctxLimit")}</div>`;
-  for (const o of opts) html += `<button data-v="limit:${o}" class="${(S.chat.ctx_limit || 0) === o ? "on" : ""}">${(S.chat.ctx_limit || 0) === o ? icon("check", "ok-ic") : icon("layers")}${o ? o / 1024 + "k tokens" : t("ctxAuto")}</button>`;
-  html += `<div class="sep"></div><button data-v="rename">${icon("edit")}${t("rename")}</button><button data-v="delete">${icon("trash")}${t("del")}</button>`;
+  for (const o of opts) {
+    const on = (S.chat.ctx_limit || 0) === o;
+    html += `<button data-v="limit:${o}" class="${on ? "on" : ""}">${on ? icon("check", "ok-ic") : icon("layers")}${o ? t("kTokens", { n: o / 1024 }) : t("ctxAuto")}</button>`;
+  }
+  html += `<div class="sep"></div><button data-v="export">${icon("download")}${t("exportMd")}</button><button data-v="rename">${icon("edit")}${t("rename")}</button><button data-v="delete">${icon("trash")}${t("del")}</button>`;
   popMenu(anchor, html, async (v) => {
     if (v === "compress") return call("compress_chat", { chatId: S.chatId });
+    if (v === "export") return exportChat();
     if (v === "rename") return startRename();
-    if (v === "delete") {
-      if (!(await confirmBox(t("confirmDeleteChat"), t("del")))) return;
-      await call("delete_chat", { id: S.chatId }); S.chatId = null; S.chat = null; S.messages = []; await refreshChats(); renderChat(); return;
-    }
+    if (v === "delete") return deleteChat(S.chatId);
     if (v.startsWith("limit:")) {
       const limit = +v.slice(6);
       S.budget = await call("set_chat_limit", { id: S.chatId, limit });
@@ -352,6 +392,12 @@ async function newChat(projectId) {
 }
 async function openChat(id) {
   const r = await call("get_chat", { id });
+  if (S.chatId !== id) {
+    // keep what was being typed in the previous chat, restore this chat's draft
+    S.drafts[S.chatId || ""] = input.value;
+    input.value = S.drafts[id] || "";
+    autosize();
+  }
   S.chatId = id; S.chat = r.chat; S.messages = r.messages; S.budget = r.budget; S.ctxUsed = r.chat.ctx_used;
   S.busy[id] = r.busy; S.live = null; S.showOld = false;
   showView("chat");
@@ -362,9 +408,9 @@ async function openChat(id) {
 function renderChat() {
   const th = $("#thread");
   th.innerHTML = "";
-  const proj = S.chat?.project_id;
-  $("#input").placeholder = S.toggles.research ? t("placeholderResearch") : proj ? t("placeholderProject") : t("placeholder");
+  updatePlaceholder();
   $("#hint").textContent = t("hint");
+  $("#jumpBtn").innerHTML = icon("chevron") + t("jumpLatest");
   renderComposer();
   if (!S.chat || !S.messages.length) { th.appendChild(welcome()); return; }
   const old = S.messages.filter((m) => m.compressed);
@@ -384,7 +430,7 @@ function renderChat() {
 function placeMessage(th, m, turn) {
   if (m.role === "user") { th.appendChild(userEl(m)); return null; }
   if (m.role === "event") { th.appendChild(eventEl(m)); return null; }
-  if (!turn) { turn = el(`<div class="turn"><div class="avatar"></div><div class="turn-body"></div></div>`); th.appendChild(turn); }
+  if (!turn) turn = th.appendChild(newTurnEl());
   if (m.compressed) turn.classList.add("old");
   const body = turn.querySelector(".turn-body");
   if (m.role === "assistant") { const n = assistantEl(m); if (n) body.appendChild(n); }
@@ -395,11 +441,10 @@ function currentTurn(create = true) {
   const th = $("#thread");
   const last = th.lastElementChild;
   if (last && last.classList.contains("turn")) return last;
-  if (!create) return null;
-  const turn = el(`<div class="turn"><div class="avatar"></div><div class="turn-body"></div></div>`);
-  th.appendChild(turn);
-  return turn;
+  return create ? th.appendChild(newTurnEl()) : null;
 }
+const newTurnEl = () => el(`<div class="turn"><div class="avatar"></div><div class="turn-body"></div></div>`);
+const fmtTime = (ms) => (ms ? new Date(ms).toLocaleString() : "");
 function markLastTurn() {
   $$(".regen-btn").forEach((b) => (b.style.display = "none"));
   const turns = $$("#thread .turn");
@@ -434,7 +479,7 @@ function welcome() {
 }
 
 function userEl(m) {
-  const n = el(`<div class="msg-user" data-id="${m.id}"><div class="bubble"></div><div class="msg-tools"></div></div>`);
+  const n = el(`<div class="msg-user" data-id="${m.id}" title="${esc(fmtTime(m.created))}"><div class="bubble"></div><div class="msg-tools"></div></div>`);
   n.querySelector(".bubble").textContent = m.content;
   const ret = m.meta?.retrieved;
   if (ret && ret.length) {
@@ -489,7 +534,7 @@ function statsHtml(meta) {
   if (meta.tps) parts.push(`<span title="tokens/s">${icon("bolt")}${meta.tps.toFixed(1)} ${t("tps")}</span>`);
   if (meta.tokens) parts.push(`<span>${icon("layers")}${meta.tokens} tok</span>`);
   if (meta.elapsed_ms) parts.push(`<span>${icon("clock")}${(meta.elapsed_ms / 1000).toFixed(1)}s</span>`);
-  if (meta.cached_tokens) parts.push(`<span title="prompt cache hit">${icon("check")}${fmtK(meta.cached_tokens)} cached</span>`);
+  if (meta.cached_tokens) parts.push(`<span title="${t("cacheHit")}">${icon("check")}${fmtK(meta.cached_tokens)} ${t("cached")}</span>`);
   return parts.join("");
 }
 function assistantEl(m) {
@@ -506,7 +551,7 @@ function assistantEl(m) {
       s.innerHTML = m.meta.sources.map((x) => `<a class="chip" href="${esc(x.url)}" title="${esc(x.url)}">${x.n}. ${esc(x.title || x.url)}</a>`).join("");
       n.appendChild(s);
     }
-    const foot = el(`<div style="display:flex;align-items:center;gap:10px"><div class="stats">${statsHtml(m.meta)}</div><div class="msg-tools"><button data-a="copy">${icon("copy")}</button><button data-a="regen" class="regen-btn">${icon("refresh")}${t("regenerate")}</button></div></div>`);
+    const foot = el(`<div style="display:flex;align-items:center;gap:10px" title="${esc(fmtTime(m.created))}"><div class="stats">${statsHtml(m.meta)}</div><div class="msg-tools"><button data-a="copy">${icon("copy")}</button><button data-a="regen" class="regen-btn">${icon("refresh")}${t("regenerate")}</button></div></div>`);
     foot.querySelector(".msg-tools").onclick = (e) => {
       const a = e.target.closest("button")?.dataset.a;
       if (a === "copy") { navigator.clipboard.writeText(m.content); toast(t("copied")); }
@@ -698,7 +743,11 @@ function addMessage(m) {
   if (atBottom || m.role === "user") scrollBottom(m.role === "user");
 }
 function isAtBottom() { const s = $("#scroller"); return s.scrollHeight - s.scrollTop - s.clientHeight < 120; }
-function scrollBottom(force) { const s = $("#scroller"); if (force || isAtBottom()) requestAnimationFrame(() => (s.scrollTop = s.scrollHeight)); }
+function scrollBottom(force) { const s = $("#scroller"); if (force || isAtBottom()) requestAnimationFrame(() => { s.scrollTop = s.scrollHeight; updateJumpBtn(); }); }
+/** "Jump to latest" appears once the user scrolls up away from the end of the thread. */
+function updateJumpBtn() { $("#jumpBtn").classList.toggle("on", !isAtBottom()); }
+$("#scroller").addEventListener("scroll", updateJumpBtn, { passive: true });
+$("#jumpBtn").addEventListener("click", () => { const s = $("#scroller"); s.scrollTo({ top: s.scrollHeight, behavior: "smooth" }); });
 
 // ---------------------------------------------------------------- composer
 function setToggle(k, v) {
@@ -706,6 +755,9 @@ function setToggle(k, v) {
   if (k === "research" && v) S.toggles.web = false;
   if (k === "web" && v) S.toggles.research = false;
   renderComposer();
+  updatePlaceholder();
+}
+function updatePlaceholder() {
   $("#input").placeholder = S.toggles.research ? t("placeholderResearch") : S.chat?.project_id ? t("placeholderProject") : t("placeholder");
 }
 function renderComposer() {
@@ -744,6 +796,7 @@ async function send() {
     await openChat(c.id);
   }
   input.value = ""; autosize();
+  delete S.drafts[S.chatId]; delete S.drafts[""];
   S.busy[S.chatId] = true; renderComposer(); renderSidebar();
   S.liveCtxBase = S.ctxUsed + estTokens(text);
   const research = S.toggles.research;
@@ -842,7 +895,7 @@ function renderModels() {
       html += `<div class="li"><span class="grow">${esc(f.path)}</span><small>${fmtBytes(f.size)}</small>${fitTag((f.size || 0) / 1073741824)}
         ${inst.has(name) ? `<span class="tag ok">${t("installed")}</span>` : dl && !dl.error ? `<div style="width:220px" data-dl="${esc(id)}">${progressHtml(dl)}</div><button class="btn ghost" data-cancel="${esc(id)}">${icon("x")}</button>` : `<button class="btn" data-dlrepo="${esc(hfState.repo)}" data-dlpath="${esc(f.path)}">${icon("download")}</button>`}</div>`;
     }
-    if (!hfState.files.length) html += `<div class="empty">No single-file GGUF found.</div>`;
+    if (!hfState.files.length) html += `<div class="empty">${t("noGguf")}</div>`;
     html += `</div>`;
   } else if (hfState.results) {
     html += `<div class="list-box">`;
@@ -895,29 +948,31 @@ function renderSettings() {
   html += `<h3>${icon("globe")}Language / Limbă</h3>`;
   html += f(t("uiLang"), "", sel("ui_lang", [["en", "English"], ["ro", "Română"]]));
   html += f(t("replyLang"), t("replyLangHint"), sel("reply_lang", [["auto", t("auto")], ["en", "English"], ["ro", "Română"]]));
-  html += `<h3>${icon("chip")}Engine</h3>`;
-  html += f(t("backend"), t("backendHint"), sel("backend", [["vulkan", "Vulkan (recommended)"], ["rocm", "ROCm / HIP"], ["cpu", "CPU only"]]));
+  html += `<h3>${icon("chip")}${t("engine")}</h3>`;
+  html += f(t("backend"), t("backendHint"), sel("backend", [["vulkan", t("vulkanRec")], ["rocm", "ROCm / HIP"], ["cpu", t("cpuOnly")]]));
   html += f(t("runtimeVer"), esc(S.runtime || "—"), `<button class="btn" id="updRt">${icon("download")}${t("update")}</button>`);
   html += f(t("ctxSize"), t("ctxSizeHint"), sel("ctx_size", [[0, t("auto")], [8192, "8k"], [16384, "16k"], [32768, "32k"], [65536, "64k"], [131072, "128k"], [262144, "256k"]]));
   html += f(t("kv"), t("kvHint"), sel("kv_cache", [["q8_0", "q8_0"], ["f16", "f16"], ["q4_0", "q4_0"]]));
   html += f(t("moe"), t("moeHint"), `<input class="inp" style="min-width:90px;width:90px" type="number" min="0" max="99" data-k="n_cpu_moe" value="${s.n_cpu_moe}"/>`);
-  html += `<h3>${icon("sparkle")}Chat</h3>`;
+  html += `<h3>${icon("sparkle")}${t("chatSection")}</h3>`;
+  html += `<div class="field col"><div><label>${t("customInstr")}</label><small>${t("customInstrHint")}</small></div><textarea class="inp" data-k="custom_instructions" placeholder="${esc(t("customInstrPh"))}">${esc(s.custom_instructions || "")}</textarea></div>`;
   html += f(t("temp"), `<span id="tempV">${(+s.temperature).toFixed(2)}</span>`, `<input type="range" min="0" max="1.5" step="0.05" data-k="temperature" value="${s.temperature}"/>`);
   html += f(t("compressAt"), `<span id="compV">${Math.round(s.compress_at * 100)}%</span> · ${t("compressHint")}`, `<input type="range" min="0.4" max="0.9" step="0.02" data-k="compress_at" value="${s.compress_at}"/>`);
-  html += f(t("think") + " (default)", "", sw("thinking"));
+  html += f(t("thinkDefault"), "", sw("thinking"));
   html += f(t("semantic"), t("semanticHint"), sw("semantic_search"));
   html += `<h3>${icon("globe")}${t("webSearch")}</h3>`;
-  html += f(t("searchProvider"), t("searchProviderHint"), sel("search_provider", [["wikipedia", "Wikipedia (no key)"], ["brave", "Brave Search API"], ["tavily", "Tavily"], ["searxng", "SearXNG (self-hosted)"]]));
+  html += f(t("searchProvider"), t("searchProviderHint"), sel("search_provider", [["wikipedia", t("wikiNoKey")], ["brave", "Brave Search API"], ["tavily", "Tavily"], ["searxng", t("searxSelf")]]));
   if (s.search_provider === "brave" || s.search_provider === "tavily") {
     const link = s.search_provider === "brave" ? "https://brave.com/search/api/" : "https://tavily.com/";
     html += f(t("apiKey"), `<a href="${link}">${link}</a>`, `<input class="inp" type="password" data-k="search_key" value="${esc(s.search_key)}" placeholder="key"/>`);
   }
   if (s.search_provider === "searxng") html += f("SearXNG URL", t("searxHint"), `<input class="inp" data-k="searxng_url" value="${esc(s.searxng_url)}" placeholder="http://localhost:8080"/>`);
-  html += `<h3>${icon("gear")}App</h3>`;
+  html += `<h3>${icon("gear")}${t("appSection")}</h3>`;
   html += f(t("tray"), t("trayHint"), sw("close_to_tray"));
   html += f(t("autoload"), "", sw("autoload_model"));
   html += f(t("dataFolder"), esc(S.root), `<button class="btn" id="openData">${icon("folder")}${t("open")}</button>`);
   html += f(t("quit"), "", `<button class="btn danger" id="quitBtn">${icon("power")}${t("quit")}</button>`);
+  html += `<h3>${icon("bolt")}${t("shortcuts")}</h3><div class="shortcuts">${SHORTCUTS.map(([k, d]) => `<div><kbd>${k}</kbd><span>${t(d)}</span></div>`).join("")}</div>`;
   html += `<h3>${icon("sparkle")}${t("about")}</h3><div class="about"><img src="logo.png" alt=""/><div><div class="ttl">Lumen v${esc(S.version)}</div><small>${t("madeBy")} Akulav · Tauri + Rust + llama.cpp ${esc(S.runtime || "")}</small></div></div>`;
   html += `<h3>${icon("list")}${t("logs")} <button class="btn ghost" id="logRef" style="margin-left:auto">${icon("refresh")}${t("refresh")}</button></h3><div class="logs" id="logs"></div>`;
   $("#settingsPage").innerHTML = html;
@@ -932,6 +987,7 @@ $("#settingsPage").addEventListener("change", async (e) => {
   if (["temperature", "compress_at"].includes(k)) v = parseFloat(v);
   S.settings[k] = v;
   await call("set_settings", { settings: S.settings });
+  if (k === "custom_instructions") return toast(t("saved")); // keep focus/scroll; nothing else depends on it
   if (["backend", "ctx_size", "kv_cache", "n_cpu_moe"].includes(k)) S.needsReload = true;
   if (k === "thinking") S.toggles.think = v;
   if (k === "ui_lang") { renderSidebar(); renderTopbar(); renderComposer(); }
@@ -1009,7 +1065,7 @@ function renderProject() {
   for (const c of projState.chats) html += `<div class="li" data-pchat="${c.id}" style="cursor:pointer">${icon("chat")}<span class="grow">${esc(c.title)}</span><small>${new Date(c.updated).toLocaleString()}</small></div>`;
   if (!projState.chats.length) html += `<div class="empty">${t("noChats")}</div>`;
   html += `</div><h3>${icon("book")}${t("instructions")}</h3><small style="color:var(--text-3)">${t("instructionsHint")}</small>
-    <textarea class="inp" id="projInstr" style="margin-top:8px"></textarea><div style="margin-top:8px;display:flex;justify-content:flex-end"><button class="btn" id="saveInstr">${icon("check")}${t("save").split(" ")[0]}</button></div>`;
+    <textarea class="inp" id="projInstr" style="margin-top:8px"></textarea><div style="margin-top:8px;display:flex;justify-content:flex-end"><button class="btn" id="saveInstr">${icon("check")}${t("saveShort")}</button></div>`;
   $("#projectPage").innerHTML = html;
   $("#projInstr").value = p.instructions || "";
   renderTopbar();
@@ -1021,7 +1077,7 @@ $("#projectPage").addEventListener("click", async (e) => {
   if (id === "projNew") return newChat(S.projectId);
   if (id === "reidx") { projState.progress = { phase: "scan", done: 0, total: 0 }; $("#projProg").innerHTML = projProgressHtml(); return call("reindex_project", { id: S.projectId }); }
   if (id === "openFolder") return invoke("open_path", { path: projState.info.project.folder });
-  if (id === "saveInstr") { await call("update_project", { id: S.projectId, name: projState.info.project.name, instructions: $("#projInstr").value }); toast("✓"); }
+  if (id === "saveInstr") { await call("update_project", { id: S.projectId, name: projState.info.project.name, instructions: $("#projInstr").value }); toast(t("saved")); }
 });
 
 // ---------------------------------------------------------------- status bar
@@ -1039,8 +1095,8 @@ function renderStatus() {
     <div class="spacer"></div>
     ${dls.length ? `<div class="seg">${icon("download")}${dls.map(([id, p]) => `${esc(p.label || id.replace("model:", ""))} ${p.total ? Math.round((p.done / p.total) * 100) : 0}%`).join(" · ")}</div>` : ""}
     <div class="seg tps ${live ? "live" : ""}" title="tokens/s">${icon("bolt")}<b>${tps ? tps.toFixed(1) : "–"}</b> ${t("tps")}</div>
-    <div class="seg" title="average">${t("avg")} <b>${m.avg_tps ? m.avg_tps.toFixed(1) : "–"}</b></div>
-    <div class="seg" title="${t("vram")}: ${fmtBytes(m.vram)} / ${fmtBytes(vt)}${m.shared ? " · shared " + fmtBytes(m.shared) : ""}">${t("vram")} <div class="meter"><div style="width:${vp}%"></div></div><b>${fmtBytes(m.vram || 0)}</b>${vt ? " / " + fmtBytes(vt) : ""}</div>
+    <div class="seg" title="${t("avgHint")}">${t("avg")} <b>${m.avg_tps ? m.avg_tps.toFixed(1) : "–"}</b></div>
+    <div class="seg" title="${t("vram")}: ${fmtBytes(m.vram)} / ${fmtBytes(vt)}${m.shared ? ` · ${t("shared")} ${fmtBytes(m.shared)}` : ""}">${t("vram")} <div class="meter"><div style="width:${vp}%"></div></div><b>${fmtBytes(m.vram || 0)}</b>${vt ? " / " + fmtBytes(vt) : ""}</div>
     <div class="seg" title="${t("ram")} (llama-server)">${t("ram")} <b>${fmtBytes(m.ram || 0)}</b></div>`;
 }
 
@@ -1055,10 +1111,13 @@ listen("server-status", (e) => {
 listen("metrics", (e) => { S.metrics = e.payload; renderStatus(); });
 listen("download-progress", (e) => {
   const p = e.payload;
-  if (p.finished || p.cancelled) { delete S.downloads[p.id]; renderStatus(); if (p.id === "runtime" || p.id === "embed-model") toast(`${p.label} ✓`); return; }
-  if (p.error) { S.downloads[p.id] = p; updateDownloadUI(p.id); return; }
-  S.downloads[p.id] = p;
-  updateDownloadUI(p.id);
+  if (p.finished || p.cancelled) {
+    delete S.downloads[p.id];
+    if (p.finished && (p.id === "runtime" || p.id === "embed-model")) toast(`${p.label} ✓`);
+  } else {
+    S.downloads[p.id] = p; // progress or { error }
+    updateDownloadUI(p.id);
+  }
   renderStatus();
 });
 listen("index-progress", (e) => {
@@ -1126,10 +1185,24 @@ listen("chat-event", (e) => {
   }
 });
 
-// keyboard shortcuts
+// ---------------------------------------------------------------- keyboard shortcuts
+// [keys, i18n key of the description] – also listed under Settings → Keyboard shortcuts
+const SHORTCUTS = [
+  ["Ctrl+N", "scNew"], ["Ctrl+K", "scSearch"], ["Ctrl+,", "scSettings"], ["Ctrl+Shift+E", "scExport"],
+  ["Esc", "scEsc"], ["Enter / Shift+Enter", "scSend"],
+];
 document.addEventListener("keydown", (e) => {
-  if (e.ctrlKey && e.key.toLowerCase() === "n") { e.preventDefault(); newChat(null); }
-  if (e.key === "Escape" && S.busy[S.chatId]) call("stop_generation", { chatId: S.chatId });
+  const k = e.key.toLowerCase();
+  if (e.ctrlKey && !e.shiftKey && k === "n") { e.preventDefault(); newChat(null); return; }
+  if (e.ctrlKey && k === "k") { e.preventDefault(); if (S.tab !== "chats") { S.tab = "chats"; renderSidebar(); } $("#searchInp").focus(); $("#searchInp").select(); return; }
+  if (e.ctrlKey && k === ",") { e.preventDefault(); showView("settings"); return; }
+  if (e.ctrlKey && e.shiftKey && k === "e" && S.chatId) { e.preventDefault(); exportChat(); return; }
+  if (e.key === "Escape") {
+    // innermost first: popup menu, dialog, then a running generation
+    if (openMenuEl) return closeMenu();
+    if (closeTopModal()) return;
+    if (S.busy[S.chatId]) call("stop_generation", { chatId: S.chatId });
+  }
 });
 
 // ---------------------------------------------------------------- boot
