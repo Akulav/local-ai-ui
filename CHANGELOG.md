@@ -6,6 +6,8 @@ versions follow [Semantic Versioning](https://semver.org/). Note changes under *
 tags it so GitHub Actions builds and publishes the release.
 
 ## [Unreleased]
+
+## [0.2.1] - 2026-11-03
 ### Added
 - GitHub Actions: `CI` checks every push/PR (cargo check, UI syntax, version match); `Release` builds the
   exe + NSIS installer on `v*` tags and publishes a GitHub release with a portable zip, the installer
@@ -14,6 +16,7 @@ tags it so GitHub Actions builds and publishes the release.
 
 ### Fixed
 - `version:bump` no longer garbles non-ASCII characters in CHANGELOG.md on Windows PowerShell 5.
+- `version:bump` also updates the app's version in `Cargo.lock`, so `cargo check --locked` keeps passing.
 
 ## [0.2.0] - 2026-11-03
 ### Added

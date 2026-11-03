@@ -28,6 +28,14 @@ $cargo = [IO.File]::ReadAllText($cargoPath)
 $cargo = ([regex]'(?m)^(version\s*=\s*")[^"]+(")').Replace($cargo, "`${1}$new`${2}", 1)
 [IO.File]::WriteAllText($cargoPath, $cargo)
 
+# Cargo.lock records our own version too; CI's `cargo check --locked` fails if it is stale
+$lockPath = Join-Path $root "src-tauri\Cargo.lock"
+if (Test-Path $lockPath) {
+    $lock = [IO.File]::ReadAllText($lockPath)
+    $lock = ([regex]'(name = "lumen"\r?\nversion = ")[^"]+(")').Replace($lock, "`${1}$new`${2}", 1)
+    [IO.File]::WriteAllText($lockPath, $lock)
+}
+
 $clPath = Join-Path $root "CHANGELOG.md"
 $cl = [IO.File]::ReadAllText($clPath)
 $date = Get-Date -Format "yyyy-MM-dd"
@@ -40,5 +48,5 @@ if ($cl -match '(?m)^## \[Unreleased\]') {
 }
 [IO.File]::WriteAllText($clPath, $cl)
 
-Write-Host "Version $current -> $new (package.json, Cargo.toml, CHANGELOG.md)"
+Write-Host "Version $current -> $new (package.json, Cargo.toml, Cargo.lock, CHANGELOG.md)"
 Write-Host "Check the CHANGELOG.md entry, commit (git commit -am `"Release v$new`"), then: npm run release"
