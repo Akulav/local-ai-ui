@@ -1,0 +1,53 @@
+# Fast checks on every push / pull request: the Rust backend compiles, the UI scripts parse,
+# and the three version numbers agree. Full release builds live in release.yml.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: lumen
+
+      - name: Install npm packages
+        run: npm ci --no-audit --no-fund
+
+      - name: Check UI scripts parse
+        run: |
+          node --check ui/app.js
+          node --check ui/i18n.js
+          node --check scripts/vendor.js
+
+      - name: Check versions match
+        shell: pwsh
+        run: |
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $cargo = ([regex]'(?m)^version\s*=\s*"([^"]+)"').Match((Get-Content src-tauri/Cargo.toml -Raw)).Groups[1].Value
+          if ($pkg -ne $cargo) { throw "package.json ($pkg) and Cargo.toml ($cargo) versions differ - run npm run version:bump" }
+          Write-Host "version $pkg"
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --locked

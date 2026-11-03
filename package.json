@@ -9,6 +9,7 @@
     "build:installer": "tauri build",
     "dev": "tauri dev",
     "version:bump": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1",
+    "release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release.ps1",
     "vendor": "node scripts/vendor.js"
   },
   "devDependencies": {

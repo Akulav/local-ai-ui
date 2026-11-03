@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
 $pkgPath = Join-Path $root "package.json"
-$pkg = Get-Content $pkgPath -Raw
+$pkg = [IO.File]::ReadAllText($pkgPath)
 $current = [regex]::Match($pkg, '"version"\s*:\s*"([^"]+)"').Groups[1].Value
 $v = [version]$current
 
@@ -24,16 +24,21 @@ $pkg = ([regex]'("version"\s*:\s*")[^"]+(")').Replace($pkg, "`${1}$new`${2}", 1)
 [IO.File]::WriteAllText($pkgPath, $pkg)
 
 $cargoPath = Join-Path $root "src-tauri\Cargo.toml"
-$cargo = Get-Content $cargoPath -Raw
+$cargo = [IO.File]::ReadAllText($cargoPath)
 $cargo = ([regex]'(?m)^(version\s*=\s*")[^"]+(")').Replace($cargo, "`${1}$new`${2}", 1)
 [IO.File]::WriteAllText($cargoPath, $cargo)
 
 $clPath = Join-Path $root "CHANGELOG.md"
-$cl = Get-Content $clPath -Raw
+$cl = [IO.File]::ReadAllText($clPath)
 $date = Get-Date -Format "yyyy-MM-dd"
-$entry = "## [$new] - $date`n### Changed`n- `n`n"
-$cl = ([regex]'## \[').Replace($cl, "$entry## [", 1)
+if ($cl -match '(?m)^## \[Unreleased\]') {
+    # notes collected under [Unreleased] become this version; a fresh empty [Unreleased] goes on top
+    $cl = ([regex]'(?m)^## \[Unreleased\][^\r\n]*').Replace($cl, "## [Unreleased]`n`n## [$new] - $date", 1)
+} else {
+    $entry = "## [$new] - $date`n### Changed`n- `n`n"
+    $cl = ([regex]'## \[').Replace($cl, "$entry## [", 1)
+}
 [IO.File]::WriteAllText($clPath, $cl)
 
 Write-Host "Version $current -> $new (package.json, Cargo.toml, CHANGELOG.md)"
-Write-Host "Fill in CHANGELOG.md, then: git commit -am `"Release v$new`" ; git tag v$new"
+Write-Host "Check the CHANGELOG.md entry, commit (git commit -am `"Release v$new`"), then: npm run release"

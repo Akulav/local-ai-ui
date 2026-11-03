@@ -14,15 +14,45 @@ Tauri 2 shell + Rust backend + plain HTML/CSS/JS UI (no bundler). Inference is d
 - git is not on PATH on the dev machine. Use GitHub Desktop or its bundled
   `%LOCALAPPDATA%\GitHubDesktop\app-*\resources\app\git\cmd\git.exe`.
 
-## Versioning
-- `package.json` is the source of truth. `tauri.conf.json` points at it, so `Cargo.toml` must match.
-- Bump with `npm run version:bump [patch|minor|major|x.y.z]` (updates both + CHANGELOG.md). Then commit and tag `vX.Y.Z`.
-- Record user-visible changes in `CHANGELOG.md` (Keep a Changelog format).
+## Versioning & releases
+- `package.json` is the source of truth. `tauri.conf.json` points at it, so `Cargo.toml` must match (CI fails otherwise).
+- Every user-visible change gets a line under `## [Unreleased]` in `CHANGELOG.md` **in the same commit**
+  (Keep a Changelog: Added / Changed / Fixed / Removed).
+- Release flow (repo: github.com/Akulav/local-ai-ui, branch `main`):
+  1. `npm run version:bump [patch|minor|major|x.y.z]` bumps package.json + Cargo.toml and turns `[Unreleased]` into `[X.Y.Z] - date`.
+  2. Commit: `Release vX.Y.Z`.
+  3. `npm run release` (scripts/release.ps1) checks the versions match, the notes are non-empty and the tree is clean,
+     then creates the annotated tag `vX.Y.Z` and pushes branch + tag. `-NoPush` only tags.
+  4. `.github/workflows/release.yml` builds on windows-latest and publishes the release with
+     `Lumen-vX.Y.Z-windows-x64-portable.zip`, `Lumen_X.Y.Z_x64-setup.exe` (NSIS, per-user) and `SHA256SUMS.txt`.
+     The body is the CHANGELOG section (`scripts/release-notes.ps1 X.Y.Z` prints it locally).
+- **Pushing, tagging and publishing are outward-facing: only do them when the user asks.** Bumping and committing locally is fine when asked to prepare a release.
+- Pre-release: use a version like `1.0.0-beta.1`. The workflow marks it as a pre-release.
+- A manual run of `Release` (Actions tab, workflow_dispatch) builds artifacts without releasing; tick `publish` for a draft release.
+
+## CI
+- `.github/workflows/ci.yml` runs on every push to `main` and on PRs: `node --check` on the UI scripts, the version
+  match check, and `cargo check --locked`. Keep `Cargo.lock` and `package-lock.json` committed, since `--locked`/`npm ci` need them.
+- If you add a dependency, commit the updated lockfile in the same change, or CI breaks.
+- The workflows use only maintained third-party actions: actions/checkout, actions/setup-node, dtolnay/rust-toolchain,
+  Swatinem/rust-cache, actions/upload-artifact, softprops/action-gh-release.
+- Before pushing, mirror CI locally: `node --check ui\app.js`, `cargo check --locked` in `src-tauri`.
+
+## Working notes for Claude
+- This is Windows + PowerShell 5.1: no `&&`; read and write UTF-8 files with `[IO.File]::ReadAllText/WriteAllText`
+  (`Get-Content -Raw` decodes as ANSI and garbles `→`, `ă`, `ș`…). Keep `.ps1` files ASCII-only.
+- `cmd /c` does not inherit PowerShell's `Set-Location`. Call `run.bat` by full path or `cd /d` inside the cmd string.
+- In PS 5.1, `[regex]::Replace(s, p, r, 1)` treats `1` as RegexOptions, not a count. Use `([regex]'p').Replace(s, r, 1)`.
+- A running `dist\Lumen\Lumen.exe` locks the exe; `run.bat` closes it. Killing it also kills llama-server (job object).
+- Model downloads are 5–20 GB. For UI/flow testing, use a small GGUF (e.g. unsloth/Qwen3.5-2B-GGUF Q4_K_M, 1.2 GB) via curl.
+- When testing the app through computer use, the native folder picker only accepts clicks (typing into it is blocked).
 
 ## Layout
 ```
 run.bat, scripts/build.ps1   one-click build (toolchain auto-install)
 scripts/bump-version.ps1     version bump; scripts/vendor.js re-copies UI libs into ui/vendor
+scripts/release.ps1          tag + push a release; scripts/release-notes.ps1 extracts CHANGELOG section
+.github/workflows/           ci.yml (checks), release.yml (build + publish on v* tags)
 ui/                          index.html, styles.css, app.js (all UI logic), i18n.js (EN/RO strings), vendor/
 src-tauri/src/
   main.rs       app setup, tray, close-to-tray, shutdown of child processes

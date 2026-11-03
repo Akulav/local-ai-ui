@@ -1,7 +1,19 @@
 # Changelog
 
 All notable changes to Lumen. The format follows [Keep a Changelog](https://keepachangelog.com/),
-versions follow [Semantic Versioning](https://semver.org/). Bump with `npm run version:bump [patch|minor|major|x.y.z]`.
+versions follow [Semantic Versioning](https://semver.org/). Note changes under **[Unreleased]** as you go;
+`npm run version:bump [patch|minor|major|x.y.z]` turns that section into the new version, and `npm run release`
+tags it so GitHub Actions builds and publishes the release.
+
+## [Unreleased]
+### Added
+- GitHub Actions: `CI` checks every push/PR (cargo check, UI syntax, version match); `Release` builds the
+  exe + NSIS installer on `v*` tags and publishes a GitHub release with a portable zip, the installer
+  and SHA256 checksums. The release notes come from this changelog.
+- `npm run release` (scripts/release.ps1): checks the version and notes, then tags and pushes.
+
+### Fixed
+- `version:bump` no longer garbles non-ASCII characters in CHANGELOG.md on Windows PowerShell 5.
 
 ## [0.2.0] - 2026-11-03
 ### Added

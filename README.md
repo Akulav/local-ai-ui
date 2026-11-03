@@ -40,12 +40,21 @@ copies it to `dist\Lumen\Lumen.exe` and launches it. Other modes:
 | `run.bat dev` | dev mode (`tauri dev`) |
 | `run.bat clean` | delete `target/` and `node_modules/` (keeps your models and chats) |
 
-## Versioning
-`package.json` holds the version (Tauri reads it, and it is synced into `Cargo.toml`). To bump it:
+## Download
+Get the latest build from [Releases](https://github.com/Akulav/local-ai-ui/releases): the **portable zip**
+(unzip and run `Lumen.exe`) or the **installer** (`-setup.exe`, no admin needed).
+
+## Versioning & releases
+`package.json` holds the version (Tauri reads it, and it is synced into `Cargo.toml`). Note changes under
+`[Unreleased]` in [CHANGELOG.md](CHANGELOG.md) as you go, then:
 ```
-npm run version:bump            # patch, or: minor | major | 1.2.3
+npm run version:bump            # patch, or: minor | major | 1.2.3 (turns [Unreleased] into the new version)
+git commit -am "Release vX.Y.Z"
+npm run release                 # checks everything, tags vX.Y.Z and pushes
 ```
-Then describe the release in [CHANGELOG.md](CHANGELOG.md), commit and tag `vX.Y.Z`.
+Pushing the tag triggers the **Release** workflow. It builds on GitHub's Windows runners and publishes the
+release with the portable zip, the installer, SHA256 checksums and the changelog entry as notes.
+The **CI** workflow checks every push and pull request.
 
 ---
 Made by **Akulav**.

@@ -1,0 +1,116 @@
+# Builds Lumen for Windows and publishes a GitHub release.
+#
+#   - Push a tag vX.Y.Z (matching package.json)  -> build + publish release vX.Y.Z
+#   - Run manually (Actions tab)                  -> build only; download the artifacts from the run
+#
+# Release assets:
+#   Lumen-vX.Y.Z-windows-x64-portable.zip   Lumen\Lumen.exe (data is stored in Lumen\LumenData)
+#   Lumen_X.Y.Z_x64-setup.exe               NSIS installer (per-user, no admin)
+#   SHA256SUMS.txt
+# The release body is the matching CHANGELOG.md section (scripts/release-notes.ps1).
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Also publish a draft release for the current package.json version"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: lumen
+
+      - name: Resolve version
+        id: ver
+        run: |
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $cargo = ([regex]'(?m)^version\s*=\s*"([^"]+)"').Match((Get-Content src-tauri/Cargo.toml -Raw)).Groups[1].Value
+          if ($pkg -ne $cargo) { throw "package.json ($pkg) and Cargo.toml ($cargo) versions differ" }
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+            if ($tag -ne "v$pkg") { throw "Tag $tag does not match package.json version v$pkg - bump the version before tagging" }
+          }
+          "version=$pkg" >> $env:GITHUB_OUTPUT
+          "tag=v$pkg" >> $env:GITHUB_OUTPUT
+          # versions like 1.0.0-beta.1 become pre-releases
+          "prerelease=$(([bool]($pkg -match '-')).ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Release notes from CHANGELOG.md
+        run: ./scripts/release-notes.ps1 -Version "${{ steps.ver.outputs.version }}" -OutFile release-notes.md
+
+      - name: Install npm packages
+        run: npm ci --no-audit --no-fund
+
+      - name: Build (exe + NSIS installer)
+        run: npx tauri build --ci
+
+      - name: Package assets
+        id: pkg
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $out = New-Item -ItemType Directory -Force "release-assets"
+
+          # portable zip: Lumen\Lumen.exe (+ readme); LumenData is created on first run
+          $stage = New-Item -ItemType Directory -Force "stage\Lumen"
+          Copy-Item "src-tauri\target\release\lumen.exe" "$stage\Lumen.exe"
+          Copy-Item README.md, CHANGELOG.md $stage
+          Compress-Archive -Path "stage\Lumen" -DestinationPath "$out\Lumen-v$v-windows-x64-portable.zip" -CompressionLevel Optimal
+
+          # installer
+          $setup = Get-ChildItem "src-tauri\target\release\bundle\nsis\*-setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "NSIS installer was not produced" }
+          Copy-Item $setup.FullName $out
+
+          # checksums
+          Get-ChildItem $out -File | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumen-${{ steps.ver.outputs.tag }}-windows-x64
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag' || inputs.publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Lumen ${{ steps.ver.outputs.tag }}
+          body_path: release-notes.md
+          draft: ${{ github.ref_type != 'tag' }}
+          prerelease: ${{ steps.ver.outputs.prerelease }}
+          files: release-assets/*
+          fail_on_unmatched_files: true
