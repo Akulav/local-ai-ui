@@ -7,6 +7,9 @@ tags it so GitHub Actions builds and publishes the release.
 
 ## [Unreleased]
 
+### Added
+- LICENSE: source-available terms (run releases and modify privately; no redistribution or commercial use).
+
 ## [0.2.1] - 2026-11-03
 ### Added
 - GitHub Actions: `CI` checks every push/PR (cargo check, UI syntax, version match); `Release` builds the
