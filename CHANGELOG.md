@@ -7,6 +7,8 @@ tags it so GitHub Actions builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-04
+
 ### Added
 - LICENSE: source-available terms (run releases and modify privately; no redistribution or commercial use).
 - Export a chat as Markdown (chat menu or Ctrl+Shift+E), including reasoning and tool calls.
