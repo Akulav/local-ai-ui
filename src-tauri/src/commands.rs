@@ -1,0 +1,274 @@
+//! Tauri commands invoked from the UI (invoke(...) in ui/app.js). Kept thin: they validate input
+//! and delegate to the modules; long-running work is spawned and reports back through events.
+
+use serde_json::{json, Value};
+use std::sync::Arc;
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
+
+use crate::chat::{self, SendOpts};
+use crate::state::{AppState, Settings};
+use crate::{models, rag, runtime, server, tools};
+
+type S<'a> = State<'a, Arc<AppState>>;
+type R<T> = Result<T, String>;
+
+fn e<E: std::fmt::Display>(err: E) -> String {
+    err.to_string()
+}
+
+/// Everything the UI needs on boot: settings, server status, catalog, version.
+#[tauri::command]
+pub fn get_state(app: AppHandle, state: S) -> Value {
+    let s = state.settings.read().clone();
+    json!({
+        "settings": s,
+        "info": *state.info.read(),
+        "root": state.paths.root.to_string_lossy(),
+        "runtime": runtime::installed_version(&state, &s.backend),
+        "catalog": models::catalog(),
+        "version": app.package_info().version.to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn set_settings(state: S, settings: Settings) {
+    *state.settings.write() = settings;
+    state.save_settings();
+}
+
+#[tauri::command]
+pub fn list_models(state: S) -> Value {
+    json!(models::local_models(&state))
+}
+
+#[tauri::command]
+pub async fn delete_model(app: AppHandle, file: String) -> R<()> {
+    models::delete_model(&app, &file).await.map_err(e)
+}
+
+#[tauri::command]
+pub async fn download_model(app: AppHandle, repo: String, path: String) -> R<String> {
+    models::download_model(&app, &repo, &path).await.map_err(e)
+}
+
+#[tauri::command]
+pub fn cancel_download(state: S, id: String) {
+    models::cancel_download(&state, &id);
+}
+
+#[tauri::command]
+pub async fn list_repo(state: S<'_>, input: String) -> R<Value> {
+    models::list_repo(&state, &input).await.map_err(e)
+}
+
+#[tauri::command]
+pub async fn search_hf(state: S<'_>, query: String) -> R<Value> {
+    models::search_hf(&state, &query).await.map_err(e)
+}
+
+#[tauri::command]
+pub async fn load_model(app: AppHandle, file: String) -> R<()> {
+    // apply catalog hints (MoE offload) when the user has not set their own
+    server::start_llm(&app, &file).await.map_err(e)
+}
+
+#[tauri::command]
+pub async fn unload_model(app: AppHandle) {
+    server::stop_llm(&app).await;
+}
+
+#[tauri::command]
+pub async fn update_runtime(app: AppHandle) -> R<String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let backend = state.settings.read().backend.clone();
+    let model = state.info.read().model.clone();
+    server::stop_all(&app).await;
+    server::stop_llm(&app).await;
+    runtime::ensure(&app, &backend, true).await.map_err(e)?;
+    if let Some(m) = model {
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = server::start_llm(&app2, &m).await;
+        });
+    }
+    Ok(runtime::installed_version(&state, &backend).unwrap_or_default())
+}
+
+#[tauri::command]
+pub fn get_logs(state: S) -> Vec<String> {
+    state.logs.lock().clone()
+}
+
+// ---------------- chats ----------------
+
+#[tauri::command]
+pub fn list_chats(state: S, project_id: Option<String>) -> R<Value> {
+    state.db.chats(project_id.as_deref()).map(|v| json!(v)).map_err(e)
+}
+
+#[tauri::command]
+pub fn create_chat(state: S, project_id: Option<String>) -> R<Value> {
+    let title = if state.settings.read().ui_lang == "ro" { "Chat nou" } else { "New chat" };
+    state.db.create_chat(project_id.as_deref(), title).map(|c| json!(c)).map_err(e)
+}
+
+#[tauri::command]
+pub fn get_chat(state: S, id: String) -> R<Value> {
+    let chat = state.db.chat(&id).map_err(e)?.ok_or("chat not found")?;
+    let messages = state.db.messages(&id).map_err(e)?;
+    let budget = chat::budget(&state, &chat);
+    let busy = state.generations.lock().contains_key(&id);
+    Ok(json!({"chat": chat, "messages": messages, "budget": budget, "busy": busy}))
+}
+
+#[tauri::command]
+pub fn rename_chat(state: S, id: String, title: String) -> R<()> {
+    state.db.rename_chat(&id, title.trim()).map_err(e)
+}
+
+#[tauri::command]
+pub fn pin_chat(state: S, id: String, pinned: bool) -> R<()> {
+    state.db.pin_chat(&id, pinned).map_err(e)
+}
+
+#[tauri::command]
+pub fn set_chat_limit(state: S, id: String, limit: u32) -> R<u32> {
+    state.db.set_chat_limit(&id, limit).map_err(e)?;
+    let chat = state.db.chat(&id).map_err(e)?.ok_or("chat not found")?;
+    Ok(chat::budget(&state, &chat))
+}
+
+#[tauri::command]
+pub fn delete_chat(state: S, id: String) -> R<()> {
+    chat::stop(&state, &id);
+    state.db.delete_chat(&id).map_err(e)
+}
+
+#[tauri::command]
+pub fn send_message(app: AppHandle, chat_id: String, text: String, think: bool, web: bool, research: bool) {
+    tauri::async_runtime::spawn(async move {
+        let _ = chat::send(app, SendOpts { chat_id, text, think, web, research }).await;
+    });
+}
+
+#[tauri::command]
+pub fn stop_generation(state: S, chat_id: String) {
+    chat::stop(&state, &chat_id);
+}
+
+#[tauri::command]
+pub fn regenerate(app: AppHandle, chat_id: String, think: bool, web: bool) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = chat::regenerate(app.clone(), chat_id.clone(), think, web).await {
+            chat::emit(&app, &chat_id, "error", json!({"error": err.to_string()}));
+        }
+    });
+}
+
+#[tauri::command]
+pub fn edit_and_resend(app: AppHandle, state: S, chat_id: String, message_id: String, text: String, think: bool, web: bool) -> R<()> {
+    let msgs = state.db.messages(&chat_id).map_err(e)?;
+    let m = msgs.iter().find(|m| m.id == message_id).ok_or("message not found")?;
+    let research = m.meta["research"].as_bool().unwrap_or(false);
+    state.db.truncate_from(&chat_id, m.seq).map_err(e)?;
+    tauri::async_runtime::spawn(async move {
+        let _ = chat::send(app, SendOpts { chat_id, text, think, web, research }).await;
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn compress_chat(app: AppHandle, chat_id: String) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = chat::compress_now(app.clone(), chat_id.clone()).await {
+            chat::emit(&app, &chat_id, "error", json!({"error": err.to_string()}));
+        }
+    });
+}
+
+#[tauri::command]
+pub fn undo_change(state: S, backup_id: String) -> R<String> {
+    tools::undo(&state, &backup_id).map_err(e)
+}
+
+// ---------------- projects ----------------
+
+#[tauri::command]
+pub fn list_projects(state: S) -> R<Value> {
+    state.db.projects().map(|v| json!(v)).map_err(e)
+}
+
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |f| {
+        let _ = tx.send(f.map(|p| p.to_string()));
+    });
+    rx.await.ok().flatten()
+}
+
+#[tauri::command]
+pub fn create_project(app: AppHandle, state: S, name: String, folder: String) -> R<Value> {
+    if !std::path::Path::new(&folder).is_dir() {
+        return Err("folder does not exist".into());
+    }
+    let name = if name.trim().is_empty() {
+        std::path::Path::new(&folder).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or("Project".into())
+    } else {
+        name.trim().to_string()
+    };
+    let p = state.db.create_project(&name, &folder).map_err(e)?;
+    let id = p.id.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = rag::index_project(&app, &id).await;
+    });
+    Ok(json!(p))
+}
+
+#[tauri::command]
+pub fn get_project(state: S, id: String) -> R<Value> {
+    let p = state.db.project(&id).map_err(e)?.ok_or("project not found")?;
+    let indexing = state.indexing.lock().contains_key(&id);
+    Ok(json!({"project": p, "stats": rag::stats(&state, &id), "indexing": indexing}))
+}
+
+#[tauri::command]
+pub fn update_project(state: S, id: String, name: String, instructions: String) -> R<()> {
+    state.db.update_project(&id, &name, &instructions).map_err(e)
+}
+
+#[tauri::command]
+pub fn delete_project(state: S, id: String) -> R<()> {
+    state.indexes.lock().remove(&id);
+    state.db.delete_project(&id).map_err(e)
+}
+
+#[tauri::command]
+pub fn reindex_project(app: AppHandle, id: String) {
+    tauri::async_runtime::spawn(async move {
+        let _ = rag::index_project(&app, &id).await;
+    });
+}
+
+// ---------------- misc ----------------
+
+#[tauri::command]
+pub fn open_url(app: AppHandle, url: String) -> R<()> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only web links can be opened".into());
+    }
+    app.opener().open_url(url, None::<&str>).map_err(e)
+}
+
+#[tauri::command]
+pub fn open_path(app: AppHandle, path: String) -> R<()> {
+    app.opener().open_path(path, None::<&str>).map_err(e)
+}
+
+#[tauri::command]
+pub async fn quit_app(app: AppHandle) {
+    crate::shutdown(&app).await;
+    app.exit(0);
+}

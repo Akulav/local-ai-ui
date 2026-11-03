@@ -1,0 +1,10 @@
+# normalise line endings in the repo; batch files must stay CRLF for cmd.exe
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# binary assets
+*.png binary
+*.ico binary
+*.icns binary

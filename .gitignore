@@ -1,0 +1,39 @@
+# ---- build outputs ----
+/src-tauri/target/
+/src-tauri/gen/
+/dist/
+*.pdb
+
+# ---- dependencies ----
+/node_modules/
+
+# ---- portable runtime data (models are many GB, chats are personal) ----
+LumenData/
+*.gguf
+*.gguf.part
+*.part
+
+# ---- local test folders ----
+/demo-project/
+
+# ---- logs & temp ----
+*.log
+npm-debug.log*
+*.tmp
+
+# ---- editors / OS ----
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- local env / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Claude Code local settings (CLAUDE.md is committed) ----
+.claude/settings.local.json
