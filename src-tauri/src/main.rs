@@ -130,6 +130,7 @@ fn main() {
             commands::rename_chat,
             commands::pin_chat,
             commands::set_chat_limit,
+            commands::set_chat_project,
             commands::delete_chat,
             commands::send_message,
             commands::stop_generation,

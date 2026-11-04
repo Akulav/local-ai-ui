@@ -82,6 +82,8 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; min-heigh
 .topbar { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); min-height: 58px; }
 .crumb { color: var(--text-3); display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
 .crumb:hover { color: var(--text-2); }
+button.crumb.link-proj { background: none; border: 1px dashed var(--line-2); border-radius: 8px; padding: 3px 9px; font-size: 12.5px; white-space: nowrap; }
+button.crumb.link-proj:hover { border-color: var(--accent); color: var(--text); }
 .title { font-weight: 600; font-size: 15.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; outline: none; border-radius: 6px; padding: 2px 6px; margin-left: -6px; }
 .title[contenteditable="true"]:focus { background: var(--panel); box-shadow: 0 0 0 1px var(--line-2); }
 .spacer { flex: 1; }

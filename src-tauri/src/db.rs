@@ -227,6 +227,12 @@ impl Db {
         Ok(())
     }
 
+    /// Moves a chat into a project (or out of it with None).
+    pub fn set_chat_project(&self, id: &str, project_id: Option<&str>) -> Result<()> {
+        self.0.lock().execute("UPDATE chats SET project_id=?2 WHERE id=?1", params![id, project_id])?;
+        Ok(())
+    }
+
     pub fn set_chat_limit(&self, id: &str, limit: u32) -> Result<()> {
         self.0.lock().execute("UPDATE chats SET ctx_limit=?2 WHERE id=?1", params![id, limit])?;
         Ok(())
@@ -328,5 +334,29 @@ impl Db {
                 |r| r.get(0),
             )
             .unwrap_or(0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_moves_into_and_out_of_a_project() {
+        let dir = std::env::temp_dir().join(format!("lumen-db-test-{}", crate::state::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        let p = db.create_project("Demo", dir.to_str().unwrap()).unwrap();
+        let c = db.create_chat(None, "New chat").unwrap();
+        assert!(db.chat_project(&db.chat(&c.id).unwrap().unwrap()).unwrap().is_none());
+        db.set_chat_project(&c.id, Some(&p.id)).unwrap();
+        let moved = db.chat(&c.id).unwrap().unwrap();
+        assert_eq!(db.chat_project(&moved).unwrap().unwrap().id, p.id);
+        assert_eq!(db.chats(Some(&p.id)).unwrap().len(), 1);
+        assert!(db.chats(None).unwrap().is_empty());
+        db.set_chat_project(&c.id, None).unwrap();
+        assert_eq!(db.chats(None).unwrap().len(), 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

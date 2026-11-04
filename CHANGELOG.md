@@ -7,6 +7,16 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-05
+
+### Fixed
+- Chats started from the sidebar could not see a project's files even after the folder was indexed, because only
+  chats created on the project page were linked to it. New chat (and Ctrl+N) now creates the chat in the project
+  you are in (its page or one of its chats, the button says "New chat in …").
+- Any chat can be linked to a project, moved to another one or taken out of it: the "Link to project" button in
+  the top bar of a standalone chat, or "Move to project" in the chat menu. The files and tools work from the next
+  message.
+
 ## [0.6.0] - 2026-11-05
 
 ### Added

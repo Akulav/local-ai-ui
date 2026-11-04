@@ -179,6 +179,18 @@ pub fn set_chat_limit(state: S, id: String, limit: u32) -> R<u32> {
     Ok(chat::budget(&state, &chat))
 }
 
+/// Links a chat to a project (its files and tools become available from the next message) or unlinks it.
+#[tauri::command]
+pub fn set_chat_project(state: S, id: String, project_id: Option<String>) -> R<()> {
+    if state.generations.lock().contains_key(&id) {
+        return Err("Wait until the reply is finished, then move the chat.".into());
+    }
+    if let Some(p) = &project_id {
+        state.db.project(p).map_err(e)?.ok_or("project not found")?;
+    }
+    state.db.set_chat_project(&id, project_id.as_deref()).map_err(e)
+}
+
 #[tauri::command]
 pub fn delete_chat(state: S, id: String) -> R<()> {
     chat::stop(&state, &id);

@@ -167,7 +167,8 @@ document.addEventListener("click", (e) => {
 
 // ---------------------------------------------------------------- sidebar
 function renderSidebarStatic() {
-  $("#newBtn").innerHTML = icon("plus") + (S.tab === "projects" ? t("newProject") : t("newChat"));
+  const cp = contextProject();
+  $("#newBtn").innerHTML = icon("plus") + esc(S.tab === "projects" ? t("newProject") : cp ? t("newChatIn", { p: cp.name }) : t("newChat"));
   $("#tabChats").innerHTML = icon("chat") + t("chats");
   $("#tabProjects").innerHTML = icon("folder") + t("projects");
   $("#tabChats").classList.toggle("on", S.tab === "chats");
@@ -306,7 +307,12 @@ $("#searchInp").addEventListener("input", (e) => {
   }, 220);
 });
 $("#searchInp").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); e.target.value = ""; e.target.dispatchEvent(new Event("input")); e.target.blur(); } });
-$("#newBtn").addEventListener("click", () => (S.tab === "projects" ? newProjectModal() : newChat(null)));
+$("#newBtn").addEventListener("click", () => (S.tab === "projects" ? newProjectModal() : newChat(contextProject()?.id || null)));
+/** The project the user is in (its page, or one of its chats): new chats are created there so they see its files. */
+function contextProject() {
+  const id = S.view === "project" ? S.projectId : S.view === "chat" ? S.chat?.project_id : null;
+  return id ? S.projects.find((p) => p.id === id) || null : null;
+}
 $("#navModels").addEventListener("click", () => showView("models"));
 $("#navSettings").addEventListener("click", () => showView("settings"));
 
@@ -343,7 +349,7 @@ function renderTopbar() {
     const proj = S.chat?.project_id ? S.projects.find((p) => p.id === S.chat.project_id) : null;
     const { used, budget, pct, mark } = ctxNumbers();
     tb.innerHTML = `
-      ${proj ? `<div class="crumb" data-go-project="${proj.id}">${icon("folder")}${esc(proj.name)} /</div>` : ""}
+      ${proj ? `<div class="crumb" data-go-project="${proj.id}">${icon("folder")}${esc(proj.name)} /</div>` : S.chat && S.projects.length ? `<button class="crumb link-proj" id="linkProj" title="${esc(t("linkProjectHint"))}">${icon("folder")}${esc(t("linkProject"))}</button>` : ""}
       <div class="title" id="chatTitle" title="${t("rename")}">${esc(S.chat?.title || t("newChat"))}</div>
       <div class="spacer"></div>
       ${S.chat ? `<div class="ctx" title="${t("ctx")}: ${used} / ${budget} tokens">
@@ -354,6 +360,7 @@ function renderTopbar() {
     $("#chatTitle").addEventListener("dblclick", startRename);
     $("[data-go-project]", tb)?.addEventListener("click", (e) => openProject(e.currentTarget.dataset.goProject));
     $("#chatMore")?.addEventListener("click", (e) => chatMenu(e.currentTarget));
+    $("#linkProj")?.addEventListener("click", (e) => projectMenu(e.currentTarget));
   } else {
     const titles = { models: t("models"), settings: t("settings"), project: S.projects.find((p) => p.id === S.projectId)?.name || t("projects") };
     tb.innerHTML = `<div class="title">${esc(titles[S.view])}</div><div class="spacer"></div>${modelPill()}`;
@@ -405,8 +412,9 @@ function chatMenu(anchor) {
     const on = (S.chat.ctx_limit || 0) === o;
     html += `<button data-v="limit:${o}" class="${on ? "on" : ""}">${on ? icon("check", "ok-ic") : icon("layers")}${o ? t("kTokens", { n: o / 1024 }) : t("ctxAuto")}</button>`;
   }
-  html += `<div class="sep"></div><button data-v="export">${icon("download")}${t("exportMd")}</button><button data-v="rename">${icon("edit")}${t("rename")}</button><button data-v="delete">${icon("trash")}${t("del")}</button>`;
+  html += `<div class="sep"></div>${S.projects.length ? `<button data-v="project">${icon("folder")}${t("moveToProject")}…</button>` : ""}<button data-v="export">${icon("download")}${t("exportMd")}</button><button data-v="rename">${icon("edit")}${t("rename")}</button><button data-v="delete">${icon("trash")}${t("del")}</button>`;
   popMenu(anchor, html, async (v) => {
+    if (v === "project") return projectMenu($("#chatMore") || anchor);
     if (v === "compress") return call("compress_chat", { chatId: S.chatId });
     if (v === "export") return exportChat();
     if (v === "rename") return startRename();
@@ -416,6 +424,24 @@ function chatMenu(anchor) {
       S.budget = await call("set_chat_limit", { id: S.chatId, limit });
       S.chat.ctx_limit = limit; renderTopbar();
     }
+  });
+}
+/** Links the open chat to a project (or unlinks it): the model gets that folder's files and tools from the next message. */
+function projectMenu(anchor) {
+  const cur = S.chat?.project_id || null;
+  let html = `<div class="lbl">${t("moveToProject")}</div>`;
+  for (const p of S.projects) html += `<button data-v="p:${esc(p.id)}" class="${p.id === cur ? "on" : ""}">${p.id === cur ? icon("check", "ok-ic") : icon("folder")}<span style="flex:1">${esc(p.name)}</span></button>`;
+  if (cur) html += `<div class="sep"></div><button data-v="none">${icon("x")}${t("noProject")}</button>`;
+  popMenu(anchor, html, async (v) => {
+    const projectId = v === "none" ? null : v.slice(2);
+    if (!S.chat || projectId === cur) return;
+    await call("set_chat_project", { id: S.chatId, projectId });
+    S.chat.project_id = projectId;
+    const p = S.projects.find((x) => x.id === projectId);
+    toast(p ? t("movedToProject", { p: p.name }) : t("movedOut"));
+    await refreshChats();
+    if (S.projectId) refreshProjectChats();
+    renderTopbar(); renderSidebar(); updatePlaceholder();
   });
 }
 function startRename() {
@@ -1431,7 +1457,7 @@ const SHORTCUTS = [
 ];
 document.addEventListener("keydown", (e) => {
   const k = e.key.toLowerCase();
-  if (e.ctrlKey && !e.shiftKey && k === "n") { e.preventDefault(); newChat(null); return; }
+  if (e.ctrlKey && !e.shiftKey && k === "n") { e.preventDefault(); newChat(contextProject()?.id || null); return; }
   if (e.ctrlKey && k === "k") { e.preventDefault(); if (S.tab !== "chats") { S.tab = "chats"; renderSidebar(); } $("#searchInp").focus(); $("#searchInp").select(); return; }
   if (e.ctrlKey && k === ",") { e.preventDefault(); showView("settings"); return; }
   if (e.ctrlKey && e.shiftKey && k === "e" && S.chatId) { e.preventDefault(); exportChat(); return; }
