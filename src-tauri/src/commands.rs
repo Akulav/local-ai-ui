@@ -9,7 +9,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::chat::{self, SendOpts};
 use crate::state::{default_title, AppState, Settings};
-use crate::{models, rag, runtime, server, tools};
+use crate::{models, rag, runtime, server, tools, updater};
 
 type S<'a> = State<'a, Arc<AppState>>;
 type R<T> = Result<T, String>;
@@ -29,13 +29,16 @@ pub fn get_state(app: AppHandle, state: S) -> Value {
         "runtime": runtime::installed_version(&state, &s.backend),
         "catalog": models::catalog(),
         "version": app.package_info().version.to_string(),
+        "updates": *state.updates.read(),
     })
 }
 
 #[tauri::command]
-pub fn set_settings(state: S, settings: Settings) {
+pub fn set_settings(app: AppHandle, state: S, settings: Settings) {
     *state.settings.write() = settings;
     state.save_settings();
+    let updates = state.updates.read().clone();
+    crate::refresh_tray(&app, &updates); // tray labels follow the UI language
 }
 
 #[tauri::command]
@@ -80,20 +83,19 @@ pub async fn unload_model(app: AppHandle) {
 
 #[tauri::command]
 pub async fn update_runtime(app: AppHandle) -> R<String> {
-    let state = app.state::<Arc<AppState>>().inner().clone();
-    let backend = state.settings.read().backend.clone();
-    let model = state.info.read().model.clone();
-    // the runtime folder is replaced, so both servers must release their exe first
-    server::stop_all(&app).await;
-    server::stop_llm(&app).await; // resets the status shown in the UI
-    runtime::ensure(&app, &backend, true).await.map_err(e)?;
-    if let Some(m) = model {
-        let app2 = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = server::start_llm(&app2, &m).await;
-        });
-    }
-    Ok(runtime::installed_version(&state, &backend).unwrap_or_default())
+    runtime::update(&app).await.map_err(e)
+}
+
+/// Checks GitHub for a newer Lumen and llama.cpp now (the background check runs every few hours).
+#[tauri::command]
+pub async fn check_updates(app: AppHandle) -> Value {
+    json!(updater::check(&app).await)
+}
+
+/// Downloads, verifies and installs the offered Lumen release; the app restarts when it succeeds.
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> R<()> {
+    updater::install_app(&app).await.map_err(e)
 }
 
 #[tauri::command]

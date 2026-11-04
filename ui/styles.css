@@ -67,6 +67,9 @@ svg.i { width: 17px; height: 17px; flex: none; stroke: currentColor; fill: none;
 .item .sub { font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-foot { border-top: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 2px; }
 .side-foot .item { padding: 8px 10px; }
+.item.update { color: #d4cfff; background: var(--accent-soft); border: 1px solid rgba(124, 108, 255, 0.45); margin-bottom: 4px; font-weight: 500; }
+.item.update:hover { background: rgba(124, 108, 255, 0.24); color: #fff; }
+.item.update.rt { color: #aee6ff; background: rgba(34, 184, 240, 0.1); border-color: rgba(34, 184, 240, 0.45); }
 .credit { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 2px; font-size: 11.5px; color: var(--text-3); }
 .credit b { font-weight: 600; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .about { display: flex; align-items: center; gap: 14px; padding: 16px 0; }
@@ -347,6 +350,24 @@ input[type="range"] { accent-color: var(--accent); width: 200px; }
 .meter > div { height: 100%; background: var(--grad); width: 0; transition: width 0.5s; }
 .meter.ram > div { background: linear-gradient(90deg, #3ccf91, #22b8f0); }
 .statusbar .msg { overflow: hidden; text-overflow: ellipsis; max-width: 380px; }
+.statusbar .seg.state { min-width: 0; flex: 0 1 auto; }
+.statusbar .seg.state .msg { min-width: 0; }
+.statusbar .seg:not(.state) { flex: none; }
+/* narrow windows: the engine panel has these numbers too */
+@media (max-width: 1240px) { .statusbar .seg.opt { display: none; } }
+@media (max-width: 1040px) { .statusbar .meter { display: none; } }
+.statusbar .engine-btn { border: 1px solid transparent; background: transparent; color: var(--text-3); padding: 3px 5px; border-radius: 7px; font: inherit; }
+.statusbar .engine-btn:hover, .statusbar .engine-btn.on { color: var(--text); border-color: var(--line-2); background: var(--panel); }
+.statusbar .engine-btn svg { width: 15px; height: 15px; }
+.engine-panel { position: fixed; left: 290px; bottom: 42px; width: 360px; max-height: calc(100vh - 120px); overflow-y: auto; z-index: 60; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 14px; box-shadow: var(--shadow); padding: 12px 14px; display: none; font-size: 12.5px; }
+.engine-panel.on { display: block; animation: up 0.15s ease; }
+.ep-h { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ep-h small { color: var(--text-3); font-size: 11px; }
+.es { padding: 6px 0; border-top: 1px solid var(--line); }
+.es:first-of-type { border-top: 0; }
+.eh { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.7px; color: var(--text-3); margin: 2px 0 4px; }
+.er { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; color: var(--text-2); }
+.er b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .toast-wrap { position: fixed; right: 18px; bottom: 46px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
 .toast { background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow); font-size: 13px; max-width: 380px; animation: up 0.2s ease; display: flex; gap: 9px; align-items: flex-start; }
@@ -355,5 +376,6 @@ input[type="range"] { accent-color: var(--accent); width: 200px; }
 .modal-bg { position: fixed; inset: 0; background: rgba(3, 4, 8, 0.6); backdrop-filter: blur(3px); z-index: 90; display: flex; align-items: center; justify-content: center; }
 .modal { background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 16px; padding: 20px 22px; width: min(520px, 92vw); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 12px; }
 .modal h4 { margin: 0; font-size: 16px; }
+.modal-text { white-space: pre-line; }
 .modal .acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 .empty { color: var(--text-3); padding: 18px 12px; text-align: center; font-size: 13px; }

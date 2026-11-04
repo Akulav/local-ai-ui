@@ -257,6 +257,8 @@ pub async fn stream_assistant(
         "tokens": r.completion_tokens,
         "prompt_tokens": r.prompt_tokens,
         "cached_tokens": r.cached_tokens,
+        "prompt_tps": r.prompt_tps,
+        "prompt_evaluated": r.prompt_evaluated,
         "ctx": r.prompt_tokens + r.completion_tokens,
         "model": model,
         "elapsed_ms": started.elapsed().as_millis() as u64,

@@ -24,6 +24,9 @@ pub struct StreamResult {
     pub completion_tokens: u32,
     pub cached_tokens: u32,
     pub tps: f64,
+    /// prompt processing speed and the prompt tokens actually evaluated (cache hits excluded)
+    pub prompt_tps: f64,
+    pub prompt_evaluated: u32,
     pub finish_reason: String,
     pub cancelled: bool,
 }
@@ -112,6 +115,8 @@ async fn stream_inner(
                     res.tps = tps;
                 }
                 res.cached_tokens = t["cache_n"].as_u64().unwrap_or(0) as u32;
+                res.prompt_tps = t["prompt_per_second"].as_f64().unwrap_or(res.prompt_tps);
+                res.prompt_evaluated = t["prompt_n"].as_u64().unwrap_or(0) as u32;
                 if res.prompt_tokens == 0 {
                     res.prompt_tokens = (t["prompt_n"].as_u64().unwrap_or(0) + t["cache_n"].as_u64().unwrap_or(0)) as u32;
                 }

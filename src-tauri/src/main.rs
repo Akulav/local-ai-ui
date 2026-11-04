@@ -18,16 +18,66 @@ mod runtime;
 mod server;
 mod state;
 mod tools;
+mod updater;
 mod web;
 mod win;
 
+use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry};
 
 use state::AppState;
+use updater::UpdateInfo;
+
+const TRAY_ID: &str = "lumen-tray";
+
+/// Tray labels follow the UI language (the tray cannot use ui/i18n.js).
+fn tray_text(lang: &str, key: &str) -> &'static str {
+    let ro = lang == "ro";
+    match key {
+        "show" => if ro { "Deschide Lumen" } else { "Open Lumen" },
+        "check" => if ro { "Caută actualizări" } else { "Check for updates" },
+        "unload" => if ro { "Descarcă modelul (eliberează VRAM)" } else { "Unload model (free VRAM)" },
+        "quit" => if ro { "Închide Lumen" } else { "Quit Lumen" },
+        "app_update" => if ro { "Actualizează Lumen la v" } else { "Update Lumen to v" },
+        "rt_update" => if ro { "Actualizează llama.cpp la " } else { "Update llama.cpp to " },
+        _ => "",
+    }
+}
+
+/// Tray menu; update entries appear only when a newer Lumen / llama.cpp exists.
+fn tray_menu(app: &AppHandle, u: &UpdateInfo) -> tauri::Result<Menu<Wry>> {
+    let lang = app.state::<Arc<AppState>>().settings.read().ui_lang.clone();
+    let item = |id: &str, text: String| MenuItem::with_id(app, id, text, true, None::<&str>);
+    let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![Box::new(item("show", tray_text(&lang, "show").into())?)];
+    if let Some(a) = &u.app {
+        items.push(Box::new(item("app_update", format!("⬆ {}{}", tray_text(&lang, "app_update"), a.version))?));
+    }
+    if let Some(r) = &u.runtime {
+        items.push(Box::new(item("rt_update", format!("⬆ {}{r}", tray_text(&lang, "rt_update")))?));
+    }
+    items.push(Box::new(item("check", tray_text(&lang, "check").into())?));
+    items.push(Box::new(item("unload", tray_text(&lang, "unload").into())?));
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
+    items.push(Box::new(item("quit", tray_text(&lang, "quit").into())?));
+    let refs: Vec<&dyn IsMenuItem<Wry>> = items.iter().map(|b| b.as_ref()).collect();
+    Menu::with_items(app, &refs)
+}
+
+/// Rebuilds the tray menu (called whenever the update state changes).
+pub fn refresh_tray(app: &AppHandle, u: &UpdateInfo) {
+    if let (Some(tray), Ok(menu)) = (app.tray_by_id(TRAY_ID), tray_menu(app, u)) {
+        let _ = tray.set_menu(Some(menu));
+        let tip = match &u.app {
+            Some(a) => format!("Lumen – update v{} available", a.version),
+            None => "Lumen – local AI · made by Akulav".to_string(),
+        };
+        let _ = tray.set_tooltip(Some(tip));
+    }
+}
 
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -67,6 +117,8 @@ fn main() {
             commands::load_model,
             commands::unload_model,
             commands::update_runtime,
+            commands::check_updates,
+            commands::install_update,
             commands::get_logs,
             commands::list_chats,
             commands::create_chat,
@@ -96,18 +148,24 @@ fn main() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
-            let show = MenuItem::with_id(app, "show", "Open Lumen", true, None::<&str>)?;
-            let unload = MenuItem::with_id(app, "unload", "Unload model (free VRAM)", true, None::<&str>)?;
-            let sep = PredefinedMenuItem::separator(app)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit Lumen", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &unload, &sep, &quit])?;
-            TrayIconBuilder::with_id("lumen-tray")
+            {
+                let st = handle.state::<Arc<AppState>>();
+                updater::cleanup(&st);
+                st.updates.write().current = handle.package_info().version.to_string();
+            }
+            let menu = tray_menu(&handle, &UpdateInfo::default())?;
+            TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().cloned().expect("icon"))
                 .tooltip("Lumen – local AI · made by Akulav")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, ev| match ev.id.as_ref() {
                     "show" => show_main(app),
+                    // the window asks for confirmation (and shows progress) before anything is installed
+                    id @ ("app_update" | "rt_update" | "check") => {
+                        show_main(app);
+                        let _ = app.emit("update-prompt", json!({ "kind": id }));
+                    }
                     "unload" => {
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move { server::stop_llm(&app).await });
@@ -129,6 +187,7 @@ fn main() {
                 .build(app)?;
 
             metrics::spawn(handle.clone());
+            updater::spawn_background(handle.clone());
 
             // hassle-free start: fetch the runtime and load the last model in the background
             let st = handle.state::<Arc<AppState>>().inner().clone();

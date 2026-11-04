@@ -71,6 +71,8 @@ const S = {
   busy: {}, live: null, liveCtxBase: 0, showOld: false, filter: "", searchHits: null,
   toggles: { think: true, web: false, research: false }, needsReload: false, lastTps: 0,
   drafts: {}, // unsent composer text per chat id ("" = no chat yet)
+  updates: {}, // from updater.rs: { current, app: {version,url}|null, runtime: tag|null, runtime_current, checking, installing, error }
+  lastPromptTps: 0, engineOpen: false,
 };
 /** Translate key `k` in the current UI language (falls back to English), filling {placeholders}. */
 const t = (k, vars) => {
@@ -90,7 +92,7 @@ async function call(cmd, args) {
 }
 function confirmBox(text, okLabel = "OK") {
   return new Promise((res) => {
-    const m = el(`<div class="modal-bg"><div class="modal"><div>${esc(text)}</div><div class="acts"><button class="btn ghost" data-a="no">${t("cancel")}</button><button class="btn primary" data-a="yes">${esc(okLabel)}</button></div></div></div>`);
+    const m = el(`<div class="modal-bg"><div class="modal"><div class="modal-text">${esc(text)}</div><div class="acts"><button class="btn ghost" data-a="no">${t("cancel")}</button><button class="btn primary" data-a="yes">${esc(okLabel)}</button></div></div></div>`);
     m.addEventListener("click", (e) => { const a = e.target.closest("[data-a]")?.dataset.a; if (a || e.target === m) { m.remove(); res(a === "yes"); } });
     m.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); m.remove(); res(true); } });
     document.body.appendChild(m);
@@ -170,6 +172,47 @@ function renderSidebarStatic() {
   $("#navModels").classList.toggle("on", S.view === "models");
   $("#navSettings").classList.toggle("on", S.view === "settings");
   $("#credit").innerHTML = `<span>${t("madeBy")} <b>Akulav</b></span><span>v${esc(S.version)}</span>`;
+  renderUpdateNav();
+}
+
+// ---------------------------------------------------------------- updates
+/** Sidebar entries that appear only when GitHub has something newer (same entries as the tray menu). */
+function renderUpdateNav() {
+  const u = S.updates || {};
+  let html = "";
+  if (u.app) html += `<div class="item update" data-upd="app">${icon("download")}<span class="t">${t("updateApp", { v: esc(u.app.version) })}</span></div>`;
+  if (u.runtime) html += `<div class="item update rt" data-upd="runtime">${icon("chip")}<span class="t">${t("updateRuntime", { v: esc(u.runtime) })}</span></div>`;
+  if (u.installing) html = `<div class="item update"><span class="spinner"></span><span class="t">${t("updateInstalling")}</span></div>`;
+  $("#navUpdate").innerHTML = html;
+}
+$("#navUpdate").addEventListener("click", (e) => {
+  const k = e.target.closest("[data-upd]")?.dataset.upd;
+  if (k === "app") promptAppUpdate();
+  if (k === "runtime") promptRuntimeUpdate();
+});
+async function promptAppUpdate() {
+  const a = S.updates.app;
+  if (!a || S.updates.installing) return;
+  const busy = Object.values(S.busy).some(Boolean);
+  const text = t("updateConfirm", { v: a.version }) + (busy ? "\n\n" + t("updateBusy") : "");
+  if (!(await confirmBox(text, t("updateNow")))) return;
+  toast(t("updateDownloading", { v: a.version }));
+  call("install_update").catch(() => {}); // on success Lumen exits and restarts into the new version
+}
+async function promptRuntimeUpdate() {
+  const r = S.updates.runtime;
+  if (!r) return;
+  if (!(await confirmBox(t("runtimeConfirm", { v: r }), t("updateNow")))) return;
+  toast(t("downloading") + " llama.cpp " + r + "…");
+  try { S.runtime = await call("update_runtime"); toast("llama.cpp " + S.runtime + " ✓"); } catch {}
+  if (S.view === "settings") renderSettings();
+}
+/** Manual check (Settings button, tray "Check for updates"); the background check is silent. */
+async function checkUpdatesNow() {
+  toast(t("updateChecking"));
+  const u = await call("check_updates");
+  if (u.error) toast(u.error, true);
+  else if (!u.app && !u.runtime) toast(t("upToDate", { v: u.current }));
 }
 
 function dateGroup(ts) {
@@ -534,6 +577,7 @@ function statsHtml(meta) {
   if (meta.tps) parts.push(`<span title="tokens/s">${icon("bolt")}${meta.tps.toFixed(1)} ${t("tps")}</span>`);
   if (meta.tokens) parts.push(`<span>${icon("layers")}${meta.tokens} tok</span>`);
   if (meta.elapsed_ms) parts.push(`<span>${icon("clock")}${(meta.elapsed_ms / 1000).toFixed(1)}s</span>`);
+  if (meta.prompt_tps && meta.prompt_evaluated > 1) parts.push(`<span title="${t("promptSpeedHint", { n: meta.prompt_evaluated })}">${icon("list")}${t("promptSpeed", { n: fmtK(Math.round(meta.prompt_tps)) })}</span>`);
   if (meta.cached_tokens) parts.push(`<span title="${t("cacheHit")}">${icon("check")}${fmtK(meta.cached_tokens)} ${t("cached")}</span>`);
   return parts.join("");
 }
@@ -719,6 +763,7 @@ function finishLive(p) {
   S.ctxUsed = p.ctx_used || S.ctxUsed; if (p.ctx_budget) S.budget = p.ctx_budget;
   S.liveCtxBase = S.ctxUsed;
   if (p.message.meta?.tps) S.lastTps = p.message.meta.tps;
+  if (p.message.meta?.prompt_tps && p.message.meta.prompt_evaluated > 1) S.lastPromptTps = p.message.meta.prompt_tps;
   updateCtxMeter(); renderStatus();
 }
 /** Appends a persisted message (deduplicated by id); a tool result replaces its "running" card. */
@@ -982,6 +1027,15 @@ function renderSettings() {
   html += f(t("quit"), "", `<button class="btn danger" id="quitBtn">${icon("power")}${t("quit")}</button>`);
   html += `<h3>${icon("bolt")}${t("shortcuts")}</h3><div class="shortcuts">${SHORTCUTS.map(([k, d]) => `<div><kbd>${k}</kbd><span>${t(d)}</span></div>`).join("")}</div>`;
   html += `<h3>${icon("sparkle")}${t("about")}</h3><div class="about"><img src="logo.png" alt=""/><div><div class="ttl">Lumen v${esc(S.version)}</div><small>${t("madeBy")} Akulav · Tauri + Rust + llama.cpp ${esc(S.runtime || "")}</small></div></div>`;
+  const u = S.updates || {};
+  const upd = u.checking ? `<span class="spinner"></span>`
+    : u.app ? `<button class="btn primary" id="installUpd">${icon("download")}${t("updateApp", { v: esc(u.app.version) })}</button>`
+    : `<button class="btn" id="checkUpd">${icon("refresh")}${t("checkNow")}</button>`;
+  const status = u.app ? t("updateAvailable", { v: esc(u.app.version) }) + (u.app.url ? ` · <a href="${esc(u.app.url)}">${t("releaseNotes")}</a>` : "")
+    : u.checked_at ? t("lastChecked", { x: esc(fmtTime(u.checked_at)) }) : t("notChecked");
+  html += f(t("updates"), status + (u.error ? `<br><span style="color:var(--bad)">${esc(u.error)}</span>` : ""), upd);
+  if (u.runtime) html += f(t("runtimeVer"), t("runtimeAvailable", { a: esc(u.runtime_current || "—"), b: esc(u.runtime) }), `<button class="btn primary" id="rtUpd">${icon("download")}${t("update")}</button>`);
+  html += f(t("autoCheck"), t("autoCheckHint"), sw("check_updates"));
   html += `<h3>${icon("list")}${t("logs")} <button class="btn ghost" id="logRef" style="margin-left:auto">${icon("refresh")}${t("refresh")}</button></h3><div class="logs" id="logs"></div>`;
   $("#settingsPage").innerHTML = html;
   loadLogs();
@@ -1013,6 +1067,9 @@ $("#settingsPage").addEventListener("click", async (e) => {
   if (id === "openData") invoke("open_path", { path: S.root });
   if (id === "quitBtn") invoke("quit_app");
   if (id === "logRef") loadLogs();
+  if (id === "checkUpd") checkUpdatesNow();
+  if (id === "installUpd") promptAppUpdate();
+  if (id === "rtUpd") promptRuntimeUpdate();
 });
 
 // ---------------------------------------------------------------- projects
@@ -1100,14 +1157,58 @@ function renderStatus() {
   const stateLbl = { ready: t("ready"), starting: t("loading"), runtime: t("runtime"), error: t("error"), stopped: t("stopped") }[i.state] || i.state;
   const msg = i.state === "stopped" && i.idle_unloaded_min ? t("idleUnloaded", { n: i.idle_unloaded_min }) : i.message || "";
   $("#statusbar").innerHTML = `
-    <div class="seg"><span class="dot ${i.state}"></span><b>${esc(stateLbl)}</b>${i.state === "ready" ? `<span>${esc(shortModel(i.model))} · ${fmtK(i.n_ctx)} ctx</span>` : `<span class="msg" title="${esc(msg)}">${esc(msg)}</span>`}</div>
+    <div class="seg state"><span class="dot ${i.state}"></span><b>${esc(stateLbl)}</b>${i.state === "ready" ? `<span class="msg">${esc(shortModel(i.model))} · ${fmtK(i.n_ctx)} ctx</span>` : `<span class="msg" title="${esc(msg)}">${esc(msg)}</span>`}</div>
+    <button class="seg engine-btn ${S.engineOpen ? "on" : ""}" id="engineBtn" title="${t("engineStats")}">${icon("chip")}</button>
     <div class="spacer"></div>
     ${dls.length ? `<div class="seg">${icon("download")}${dls.map(([id, p]) => `${esc(p.label || id.replace("model:", ""))} ${p.total ? Math.round((p.done / p.total) * 100) : 0}%`).join(" · ")}</div>` : ""}
     <div class="seg tps ${live ? "live" : ""}" title="tokens/s">${icon("bolt")}<b>${tps ? tps.toFixed(1) : "–"}</b> ${t("tps")}</div>
-    <div class="seg" title="${t("avgHint")}">${t("avg")} <b>${m.avg_tps ? m.avg_tps.toFixed(1) : "–"}</b></div>
+    <div class="seg opt" title="${t("avgHint")}">${t("avg")} <b>${m.avg_tps ? m.avg_tps.toFixed(1) : "–"}</b></div>
     <div class="seg" title="${t("vram")}: ${fmtBytes(m.vram)} / ${fmtBytes(vt)}${m.shared ? ` · ${t("shared")} ${fmtBytes(m.shared)}` : ""}">${t("vram")} <div class="meter"><div style="width:${vp}%"></div></div><b>${fmtBytes(m.vram || 0)}</b>${vt ? " / " + fmtBytes(vt) : ""}</div>
-    <div class="seg" title="${t("ram")} (llama-server)">${t("ram")} <b>${fmtBytes(m.ram || 0)}</b></div>`;
+    <div class="seg opt" title="${t("ram")} (llama-server)">${t("ram")} <b>${fmtBytes(m.ram || 0)}</b></div>
+    ${i.pid ? `<div class="seg" title="${t("gpuLoad")}">${t("gpu")} <b>${Math.round(m.gpu || 0)}%</b></div><div class="seg opt" title="${t("cpuLoad")}">${t("cpu")} <b>${Math.round(m.cpu || 0)}%</b></div>` : ""}`;
+  $("#engineBtn").onclick = (e) => { e.stopPropagation(); S.engineOpen = !S.engineOpen; renderStatus(); };
+  renderEnginePanel();
 }
+
+const fmtDur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h} h ${m} min` : m ? `${m} min ${s % 60} s` : `${s} s`; };
+const fmtNum = (n) => (n == null ? "–" : Math.round(n).toLocaleString());
+/** Live engine telemetry (local only): process load and llama-server's own counters since the model loaded. */
+function renderEnginePanel() {
+  const p = $("#enginePanel");
+  p.classList.toggle("on", S.engineOpen);
+  if (!S.engineOpen) return;
+  const i = S.info, m = S.metrics, e = m.engine || {};
+  const row = (k, v) => `<div class="er"><span>${k}</span><b>${v}</b></div>`;
+  const sec = (title, rows) => `<div class="es"><div class="eh">${title}</div>${rows}</div>`;
+  const ready = i.state === "ready";
+  let html = `<div class="ep-h">${icon("chip")}<b>${t("engineStats")}</b><span class="spacer"></span><small>${t("engineLocal")}</small></div>`;
+  html += sec(t("engineProc"),
+    row(t("model"), ready ? esc(shortModel(i.model)) : esc(t("noModel"))) +
+    row(t("backend"), `${esc(S.settings.backend || "")} · llama.cpp ${esc(S.runtime || "—")}`) +
+    (ready ? row(t("uptime"), i.loaded_at ? fmtDur((Date.now() - i.loaded_at) / 1000) : "–") + row("PID", i.pid) + row(t("ctx"), fmtK(i.n_ctx) + " tok") : ""));
+  html += sec(t("engineLoad"),
+    row(t("gpuLoad"), `${Math.round(m.gpu || 0)}%`) + row(t("cpuLoad"), `${Math.round(m.cpu || 0)}%`) +
+    row(t("vram"), `${fmtBytes(m.vram || 0)} / ${fmtBytes(m.vram_total || i.vram_total || 0)}`) +
+    row(t("sharedMem"), fmtBytes(m.shared || 0)) + row(t("ram"), fmtBytes(m.ram || 0)));
+  html += sec(t("engineSpeed"),
+    row(t("genNow"), m.tps ? m.tps.toFixed(1) + " tok/s" : "–") +
+    row(t("genLast"), S.lastTps ? S.lastTps.toFixed(1) + " tok/s" : "–") +
+    row(t("genAvg"), m.avg_tps ? m.avg_tps.toFixed(1) + " tok/s" : "–") +
+    row(t("promptLast"), S.lastPromptTps ? fmtNum(S.lastPromptTps) + " tok/s" : "–") +
+    row(t("promptAvg"), e.prompt_tokens_seconds ? fmtNum(e.prompt_tokens_seconds) + " tok/s" : "–"));
+  if (ready && m.engine) {
+    html += sec(t("engineTotals"),
+      row(t("promptTok"), fmtNum(e.prompt_tokens_total)) +
+      row(t("cachedTok"), fmtNum(e.prompt_tokens_cached_total)) +
+      row(t("genTok"), fmtNum(e.tokens_predicted_total)) +
+      row(t("busyTime"), fmtDur((e.prompt_seconds_total || 0) + (e.tokens_predicted_seconds_total || 0))) +
+      row(t("requests"), `${fmtNum(e.requests_processing)} / ${fmtNum(e.requests_deferred)}`));
+  }
+  p.innerHTML = html;
+}
+document.addEventListener("click", (e) => {
+  if (S.engineOpen && !e.target.closest("#enginePanel, #engineBtn")) { S.engineOpen = false; renderStatus(); }
+});
 
 // ---------------------------------------------------------------- events
 listen("server-status", (e) => {
@@ -1124,6 +1225,20 @@ listen("server-status", (e) => {
   if (S.view === "models") renderModels();
 });
 listen("metrics", (e) => { S.metrics = e.payload; renderStatus(); });
+listen("update-status", (e) => {
+  const prev = S.updates?.app?.version;
+  S.updates = e.payload;
+  if (S.updates.app && S.updates.app.version !== prev) toast(t("updateAvailable", { v: S.updates.app.version }));
+  renderUpdateNav();
+  if (S.view === "settings") renderSettings();
+});
+// tray menu → the window confirms and shows progress
+listen("update-prompt", (e) => {
+  const k = e.payload.kind;
+  if (k === "app_update") promptAppUpdate();
+  if (k === "rt_update") promptRuntimeUpdate();
+  if (k === "check") checkUpdatesNow();
+});
 listen("download-progress", (e) => {
   const p = e.payload;
   if (p.finished || p.cancelled) {
@@ -1213,9 +1328,10 @@ document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && k === ",") { e.preventDefault(); showView("settings"); return; }
   if (e.ctrlKey && e.shiftKey && k === "e" && S.chatId) { e.preventDefault(); exportChat(); return; }
   if (e.key === "Escape") {
-    // innermost first: popup menu, dialog, then a running generation
+    // innermost first: popup menu, dialog, engine panel, then a running generation
     if (openMenuEl) return closeMenu();
     if (closeTopModal()) return;
+    if (S.engineOpen) { S.engineOpen = false; return renderStatus(); }
     if (S.busy[S.chatId]) call("stop_generation", { chatId: S.chatId });
   }
 });
@@ -1224,6 +1340,7 @@ document.addEventListener("keydown", (e) => {
 (async function boot() {
   const st = await invoke("get_state");
   S.settings = st.settings; S.info = st.info; S.catalog = st.catalog; S.root = st.root; S.runtime = st.runtime; S.version = st.version;
+  S.updates = st.updates || {};
   S.toggles.think = !!S.settings.thinking;
   await Promise.all([refreshChats(), refreshProjects(), refreshModels()]);
   showView("chat");

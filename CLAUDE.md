@@ -88,12 +88,14 @@ src-tauri/src/
   web.rs        search via APIs (Brave/Tavily/SearXNG, Wikipedia fallback) + readable page extraction
   extract.rs    text from code/text/PDF/DOCX
   prompts.rs    every system prompt (EN/RO language rules live here)
-  metrics.rs    1 s sampler: process RAM + per-process VRAM → `metrics` event
+  metrics.rs    1 s sampler: RAM, VRAM, GPU/CPU load, llama-server /metrics counters → `metrics`; idle unload
+  updater.rs    GitHub update check (Lumen + llama.cpp), SHA256-verified install, exe swap / NSIS, relaunch
   win.rs        Windows job object (kill children on exit/crash), RAM, PDH GPU memory counters
 ```
 
 ## Backend → UI events
-`server-status`, `metrics`, `download-progress`, `index-progress`, `chat-event`
+`server-status`, `metrics`, `download-progress`, `index-progress`, `update-status` (UpdateInfo),
+`update-prompt` (tray asked to update/check; the window confirms), `chat-event`
 (`chat-event.kind`: busy, message, message_update, assistant_start, delta, progress, tool_pending,
 tool_start, assistant_done, assistant_failed, compress_progress, compressed, ctx, title, error).
 
@@ -108,6 +110,12 @@ tool_start, assistant_done, assistant_failed, compress_progress, compressed, ctx
   around bot checks. Wikipedia and DuckDuckGo requests must send the honest `Lumen/...` User-Agent.
   The default provider is DuckDuckGo's keyless Instant Answer API (`api.duckduckgo.com`), topped up with
   Wikipedia; it has no full-web results, and scraping `html.duckduckgo.com` is not allowed.
+- Self-update (updater.rs) trusts only `github.com/Akulav/local-ai-ui` releases and refuses a file whose SHA256
+  is not in that release's `SHA256SUMS.txt`, so keep the release workflow producing that file and the asset names
+  `Lumen-vX.Y.Z-windows-x64-portable.zip` (with `Lumen/Lumen.exe` inside) and `*-setup.exe`. Nothing installs
+  without the user confirming in the window. Telemetry is local only: nothing about usage leaves the PC.
+- Opt-in tests: `cargo test -- --ignored` runs the real update pipeline against the latest release, and
+  `live_llama_server_telemetry` (needs `LUMEN_TEST_SERVER` / `LUMEN_TEST_MODEL` env vars) checks GPU/CPU counters.
 - Idle auto-unload: `settings.idle_unload_min` (metrics.rs `check_idle`). Anything that uses the chat model must
   either register in `state.generations` or call `state.touch()`, or the model can be unloaded under it.
 - All user-facing strings go in `ui/i18n.js` in both `en` and `ro`.

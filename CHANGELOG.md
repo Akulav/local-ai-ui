@@ -7,6 +7,20 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-04
+
+### Added
+- Update check: Lumen looks for new Lumen and llama.cpp releases on GitHub at start-up and every 6 hours
+  (Settings → About, can be turned off). When one exists, an Update entry appears in the sidebar and in the
+  tray's right-click menu, and Settings shows what's new.
+- One-click Lumen update: downloads the release, verifies it against the release's SHA256SUMS.txt, installs it
+  (portable copies swap the exe, installed copies run the installer) and restarts.
+- llama.cpp engine updates are offered the same way; the model is reloaded afterwards.
+- Engine telemetry panel (chip icon in the status bar): GPU and CPU load of llama-server, VRAM/shared/RAM,
+  uptime, live/last/average generation speed, prompt-processing speed, and the server's token and request
+  counters since the model loaded. Everything stays on the PC.
+- GPU and CPU load in the status bar, and prompt-processing speed under each reply.
+
 ## [0.4.0] - 2026-11-04
 
 ### Added

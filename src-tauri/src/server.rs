@@ -124,6 +124,7 @@ pub async fn stop_llm(app: &AppHandle) {
         i.port = 0;
         i.message.clear();
         i.idle_unloaded_min = 0;
+        i.loaded_at = 0;
     });
 }
 
@@ -197,6 +198,7 @@ pub async fn start_llm(app: &AppHandle, model_file: &str) -> Result<()> {
         "--load-mode".into(),
         "none".into(),
         "--no-webui".into(),
+        "--metrics".into(), // Prometheus counters for the engine panel (metrics.rs)
         "--fit".into(),
         "on".into(),
         "--fit-ctx".into(),
@@ -248,6 +250,7 @@ pub async fn start_llm(app: &AppHandle, model_file: &str) -> Result<()> {
         i.port = port;
         i.n_ctx = n_ctx;
         i.message = String::new();
+        i.loaded_at = crate::state::now_ms();
     });
     state.log(format!("[lumen] model ready on port {port}, n_ctx={n_ctx}"));
     Ok(())

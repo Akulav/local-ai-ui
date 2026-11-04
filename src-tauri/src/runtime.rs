@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
-use crate::state::AppState;
+use crate::state::{AppState, LUMEN_UA};
 
 pub fn runtime_dir(state: &AppState, backend: &str) -> PathBuf {
     state.paths.runtime.join(format!("llama-{backend}"))
@@ -33,25 +33,21 @@ fn asset_suffix(backend: &str) -> &'static str {
     }
 }
 
-/// Download (or update) the llama.cpp build for the chosen backend.
-pub async fn ensure(app: &AppHandle, backend: &str, force: bool) -> Result<PathBuf> {
-    let state = app.state::<Arc<AppState>>();
-    let exe = server_exe(&state, backend);
-    if exe.exists() && !force {
-        return Ok(exe);
-    }
-    state.log(format!("[runtime] fetching llama.cpp ({backend}) release list"));
+/// Newest llama.cpp release that has a Windows build for `backend`: (tag, zip url, zip name).
+pub async fn latest_release(state: &AppState, backend: &str) -> Result<(String, String, String)> {
     let releases: Value = state
         .http
         .get("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20")
+        .header("User-Agent", LUMEN_UA)
         .header("Accept", "application/vnd.github+json")
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
     let suffix = asset_suffix(backend);
-    let (tag, url, name) = releases
+    releases
         .as_array()
         .into_iter()
         .flatten()
@@ -63,7 +59,39 @@ pub async fn ensure(app: &AppHandle, backend: &str, force: bool) -> Result<PathB
                 ok.then(|| (tag.clone(), a["browser_download_url"].as_str().unwrap_or_default().to_string(), n.to_string()))
             })
         })
-        .ok_or_else(|| anyhow!("no llama.cpp release asset found for backend '{backend}'"))?;
+        .ok_or_else(|| anyhow!("no llama.cpp release asset found for backend '{backend}'"))
+}
+
+/// Replaces the runtime with the newest build (stops the servers first, reloads the model after).
+/// Returns the installed version.
+pub async fn update(app: &AppHandle) -> Result<String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let backend = state.settings.read().backend.clone();
+    let model = state.info.read().model.clone();
+    // the runtime folder is replaced, so both servers must release their exe first
+    crate::server::stop_all(app).await;
+    crate::server::stop_llm(app).await; // resets the status shown in the UI
+    ensure(app, &backend, true).await?;
+    let version = installed_version(&state, &backend);
+    crate::updater::runtime_updated(app, version.clone());
+    if let Some(m) = model {
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::server::start_llm(&app2, &m).await;
+        });
+    }
+    Ok(version.unwrap_or_default())
+}
+
+/// Download (or update) the llama.cpp build for the chosen backend.
+pub async fn ensure(app: &AppHandle, backend: &str, force: bool) -> Result<PathBuf> {
+    let state = app.state::<Arc<AppState>>();
+    let exe = server_exe(&state, backend);
+    if exe.exists() && !force {
+        return Ok(exe);
+    }
+    state.log(format!("[runtime] fetching llama.cpp ({backend}) release list"));
+    let (tag, url, name) = latest_release(&state, backend).await?;
 
     let tmp_zip = state.paths.runtime.join(&name);
     let cancel = Arc::new(AtomicBool::new(false));

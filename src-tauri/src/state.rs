@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::db::Db;
 use crate::rag::ProjectIndex;
 use crate::server::ServerProc;
+use crate::updater::UpdateInfo;
 use crate::win::Job;
 
 /// Portable layout: everything lives next to the exe (falls back to %LOCALAPPDATA% when not writable).
@@ -82,6 +83,8 @@ pub struct Settings {
     /// Unload the chat model after this many idle minutes to free VRAM (0 = never).
     /// The UI reloads it automatically on the next message.
     pub idle_unload_min: u32,
+    /// Look for new Lumen / llama.cpp releases on GitHub in the background.
+    pub check_updates: bool,
     /// "duckduckgo" (no key) | "wikipedia" (no key) | "brave" | "tavily" | "searxng"
     pub search_provider: String,
     pub search_key: String,
@@ -108,6 +111,7 @@ impl Default for Settings {
             close_to_tray: true,
             autoload_model: true,
             idle_unload_min: 30,
+            check_updates: true,
             search_provider: "duckduckgo".into(),
             search_key: String::new(),
             searxng_url: String::new(),
@@ -130,6 +134,8 @@ pub struct LlmInfo {
     pub gpu_name: String,
     /// Set when the model was unloaded for being idle (minutes), so the UI can say why; 0 otherwise.
     pub idle_unloaded_min: u32,
+    /// When the current model became ready (ms), for the engine uptime.
+    pub loaded_at: i64,
 }
 
 pub struct AppState {
@@ -150,6 +156,7 @@ pub struct AppState {
     pub live_tps: RwLock<f64>,
     /// Last time the chat model was used (ms), for the idle auto-unload in metrics.rs.
     pub last_activity: AtomicI64,
+    pub updates: RwLock<UpdateInfo>,
     pub quitting: AtomicBool,
 }
 
@@ -178,6 +185,7 @@ impl AppState {
             logs: Arc::new(Mutex::new(Vec::new())),
             live_tps: RwLock::new(0.0),
             last_activity: AtomicI64::new(now_ms()),
+            updates: RwLock::new(UpdateInfo::default()),
             quitting: AtomicBool::new(false),
         })
     }

@@ -2,7 +2,7 @@
 //! per-process RAM, and per-process VRAM through the "GPU Process Memory" performance counters.
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::System::JobObjects::*;
 use windows::Win32::System::Performance::*;
 use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -51,12 +51,25 @@ pub fn process_ram(pid: u32) -> u64 {
     }
 }
 
-/// Reads dedicated + shared GPU memory used by one process (any vendor, WDDM counters).
+/// Total CPU time (kernel + user) a process has used so far, in 100 ns units.
+pub fn process_cpu_time(pid: u32) -> Option<u64> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let (mut c, mut e, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u).is_ok();
+        let _ = CloseHandle(h);
+        let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+        ok.then(|| t(k) + t(u))
+    }
+}
+
+/// Reads dedicated + shared GPU memory and GPU engine load of one process (any vendor, WDDM counters).
 pub struct GpuMemCounter {
     pid: u32,
     query: isize,
     dedicated: isize,
     shared: isize,
+    util: isize,
 }
 
 impl GpuMemCounter {
@@ -75,8 +88,11 @@ impl GpuMemCounter {
                 return None;
             }
             let _ = PdhAddEnglishCounterW(query, PCWSTR(p2.as_ptr()), 0, &mut shared);
+            let mut util = 0isize;
+            let p3: Vec<u16> = format!("\\GPU Engine(pid_{pid}_*)\\Utilization Percentage\0").encode_utf16().collect();
+            let _ = PdhAddEnglishCounterW(query, PCWSTR(p3.as_ptr()), 0, &mut util);
             let _ = PdhCollectQueryData(query);
-            Some(GpuMemCounter { pid, query, dedicated, shared })
+            Some(GpuMemCounter { pid, query, dedicated, shared, util })
         }
     }
 
@@ -84,15 +100,40 @@ impl GpuMemCounter {
         self.pid
     }
 
-    /// (dedicated, shared) bytes
-    pub fn sample(&self) -> (u64, u64) {
+    /// (dedicated bytes, shared bytes, GPU load %)
+    pub fn sample(&self) -> (u64, u64, f64) {
         unsafe {
             if PdhCollectQueryData(self.query) != 0 {
-                return (0, 0);
+                return (0, 0, 0.0);
             }
-            (sum_array(self.dedicated), sum_array(self.shared))
+            let util = if self.util != 0 { busiest_engine(self.util) } else { 0.0 };
+            (sum_array(self.dedicated), sum_array(self.shared), util)
         }
     }
+}
+
+/// Load of the busiest engine type (3D, Compute, Copy…) like Task Manager's GPU column: the
+/// instances of one type are summed, the highest type wins.
+unsafe fn busiest_engine(counter: isize) -> f64 {
+    let mut size: u32 = 0;
+    let mut count: u32 = 0;
+    let _ = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, None);
+    if size == 0 {
+        return 0.0;
+    }
+    let mut buf = vec![0u8; size as usize + 64];
+    let items = buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
+    if PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, Some(items)) != 0 {
+        return 0.0;
+    }
+    let mut by_type: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for i in 0..count as usize {
+        let it = &*items.add(i);
+        let name = it.szName.to_string().unwrap_or_default();
+        let kind = name.rsplit("engtype_").next().unwrap_or("").to_string();
+        *by_type.entry(kind).or_default() += it.FmtValue.Anonymous.doubleValue.max(0.0);
+    }
+    by_type.values().cloned().fold(0.0, f64::max).min(100.0)
 }
 
 unsafe fn sum_array(counter: isize) -> u64 {
