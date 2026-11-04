@@ -21,12 +21,15 @@ Tauri 2 shell + Rust backend + plain HTML/CSS/JS UI (no bundler). Inference is d
 - Release flow (repo: github.com/Akulav/local-ai-ui, branch `main`):
   1. `npm run version:bump [patch|minor|major|x.y.z]` bumps package.json + Cargo.toml and turns `[Unreleased]` into `[X.Y.Z] - date`.
   2. Commit: `Release vX.Y.Z`.
-  3. `npm run release` (scripts/release.ps1) checks the versions match, the notes are non-empty and the tree is clean,
-     then creates the annotated tag `vX.Y.Z` and pushes branch + tag. `-NoPush` only tags.
-  4. `.github/workflows/release.yml` builds on windows-latest and publishes the release with
+  3. Push `main` (`npm run release` checks the versions match, the notes are non-empty, the tree is clean and the
+     version is not released yet, then pushes `main`; `-NoPush` only checks). Pushing from GitHub Desktop works too.
+  4. `.github/workflows/release.yml` runs on pushes to `main` that touch `package.json`. If tag `vX.Y.Z` does not exist
+     on GitHub yet, it builds on windows-latest, creates the tag and publishes the release with
      `Lumen-vX.Y.Z-windows-x64-portable.zip`, `Lumen_X.Y.Z_x64-setup.exe` (NSIS, per-user) and `SHA256SUMS.txt`.
      The body is the CHANGELOG section (`scripts/release-notes.ps1 X.Y.Z` prints it locally).
-- **Pushing, tagging and publishing are outward-facing: only do them when the user asks.** Bumping and committing locally is fine when asked to prepare a release.
+     Do not create or push `v*` tags by hand; the workflow owns them.
+- **Pushing and publishing are outward-facing: only do them when the user asks.** Bumping and committing locally is fine when asked to prepare a release.
+- Claude's shell cannot authenticate to GitHub (no credential prompt); the user pushes from GitHub Desktop.
 - Pre-release: use a version like `1.0.0-beta.1`. The workflow marks it as a pre-release.
 - A manual run of `Release` (Actions tab, workflow_dispatch) builds artifacts without releasing; tick `publish` for a draft release.
 

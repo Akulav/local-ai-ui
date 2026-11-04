@@ -176,11 +176,11 @@ The exe ends up in `src-tauri\target\release\lumen.exe`.
 ```bash
 npm run version:bump            # patch, or: minor | major | 1.2.3 (turns [Unreleased] into the new version)
 git commit -am "Release vX.Y.Z"
-npm run release                 # checks everything, tags vX.Y.Z and pushes
+npm run release                 # checks everything and pushes main (or push from GitHub Desktop)
 ```
 
-Pushing the tag triggers the **Release** workflow. It builds on GitHub's Windows runners and publishes the
-release with the portable zip, the installer, SHA256 checksums and the changelog entry as notes.
+When `main` gets a version that has no release yet, the **Release** workflow builds it on GitHub's Windows
+runners, creates the `vX.Y.Z` tag and publishes the release with the portable zip, the installer, SHA256 checksums and the changelog entry as notes.
 The **CI** workflow checks every push and pull request.
 
 </details>

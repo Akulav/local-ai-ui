@@ -1,7 +1,9 @@
 # Builds Lumen for Windows and publishes a GitHub release.
 #
-#   - Push a tag vX.Y.Z (matching package.json)  -> build + publish release vX.Y.Z
-#   - Run manually (Actions tab)                  -> build only; download the artifacts from the run
+#   - Push to main with a package.json version that has no tag yet (npm run version:bump, commit, push)
+#       -> build, create tag vX.Y.Z on that commit, publish release vX.Y.Z
+#   - Push to main where the version is already released -> nothing to do (the check job skips the build)
+#   - Run manually (Actions tab) -> build only; tick `publish` for a draft release of an unreleased version
 #
 # Release assets:
 #   Lumen-vX.Y.Z-windows-x64-portable.zip   Lumen\Lumen.exe (data is stored in Lumen\LumenData)
@@ -12,23 +14,69 @@ name: Release
 
 on:
   push:
-    tags: ["v*.*.*"]
+    branches: [main]
+    # the version lives in package.json; the workflow file is listed so a change to it re-checks the version
+    paths: [package.json, .github/workflows/release.yml]
   workflow_dispatch:
     inputs:
       publish:
-        description: "Also publish a draft release for the current package.json version"
+        description: "Also publish a draft release for the current package.json version (if it is not released yet)"
         type: boolean
         default: false
 
 permissions:
   contents: write
 
+# one release run at a time, never cancelled half-way through publishing
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
+      build: ${{ steps.ver.outputs.build }}
+      publish: ${{ steps.ver.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and whether it is new
+        id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          MANUAL_PUBLISH: ${{ inputs.publish }}
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' src-tauri/Cargo.toml | head -n1)
+          if [ "$pkg" != "$cargo" ]; then
+            echo "::error::package.json ($pkg) and Cargo.toml ($cargo) versions differ - use npm run version:bump"
+            exit 1
+          fi
+          tag="v$pkg"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then released=true; else released=false; fi
+
+          build=false; publish=false
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            build=true
+            if [ "$MANUAL_PUBLISH" = "true" ] && [ "$released" = "false" ]; then publish=true; fi
+          elif [ "$released" = "false" ]; then
+            build=true; publish=true
+          fi
+          if [ "$released" = "true" ]; then echo "::notice::$tag is already released - nothing to publish"; fi
+          # versions like 1.0.0-beta.1 become pre-releases
+          case "$pkg" in *-*) pre=true ;; *) pre=false ;; esac
+          {
+            echo "version=$pkg"; echo "tag=$tag"; echo "prerelease=$pre"
+            echo "build=$build"; echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
   build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: windows-latest
     defaults:
       run:
@@ -48,23 +96,8 @@ jobs:
           workspaces: src-tauri
           shared-key: lumen
 
-      - name: Resolve version
-        id: ver
-        run: |
-          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $cargo = ([regex]'(?m)^version\s*=\s*"([^"]+)"').Match((Get-Content src-tauri/Cargo.toml -Raw)).Groups[1].Value
-          if ($pkg -ne $cargo) { throw "package.json ($pkg) and Cargo.toml ($cargo) versions differ" }
-          if ("${{ github.ref_type }}" -eq "tag") {
-            $tag = "${{ github.ref_name }}"
-            if ($tag -ne "v$pkg") { throw "Tag $tag does not match package.json version v$pkg - bump the version before tagging" }
-          }
-          "version=$pkg" >> $env:GITHUB_OUTPUT
-          "tag=v$pkg" >> $env:GITHUB_OUTPUT
-          # versions like 1.0.0-beta.1 become pre-releases
-          "prerelease=$(([bool]($pkg -match '-')).ToString().ToLower())" >> $env:GITHUB_OUTPUT
-
       - name: Release notes from CHANGELOG.md
-        run: ./scripts/release-notes.ps1 -Version "${{ steps.ver.outputs.version }}" -OutFile release-notes.md
+        run: ./scripts/release-notes.ps1 -Version "${{ needs.check.outputs.version }}" -OutFile release-notes.md
 
       - name: Install npm packages
         run: npm ci --no-audit --no-fund
@@ -73,9 +106,8 @@ jobs:
         run: npx tauri build --ci
 
       - name: Package assets
-        id: pkg
         run: |
-          $v = "${{ steps.ver.outputs.version }}"
+          $v = "${{ needs.check.outputs.version }}"
           $out = New-Item -ItemType Directory -Force "release-assets"
 
           # portable zip: Lumen\Lumen.exe (+ readme); LumenData is created on first run
@@ -98,19 +130,20 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lumen-${{ steps.ver.outputs.tag }}-windows-x64
+          name: lumen-${{ needs.check.outputs.tag }}-windows-x64
           path: release-assets/*
           if-no-files-found: error
 
+      # creates the tag on the built commit; manual runs only make a draft
       - name: Publish GitHub release
-        if: github.ref_type == 'tag' || inputs.publish
+        if: needs.check.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
+          tag_name: ${{ needs.check.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Lumen ${{ steps.ver.outputs.tag }}
+          name: Lumen ${{ needs.check.outputs.tag }}
           body_path: release-notes.md
-          draft: ${{ github.ref_type != 'tag' }}
-          prerelease: ${{ steps.ver.outputs.prerelease }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          prerelease: ${{ needs.check.outputs.prerelease }}
           files: release-assets/*
           fail_on_unmatched_files: true

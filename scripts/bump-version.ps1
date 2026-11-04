@@ -49,4 +49,4 @@ if ($cl -match '(?m)^## \[Unreleased\]') {
 [IO.File]::WriteAllText($clPath, $cl)
 
 Write-Host "Version $current -> $new (package.json, Cargo.toml, Cargo.lock, CHANGELOG.md)"
-Write-Host "Check the CHANGELOG.md entry, commit (git commit -am `"Release v$new`"), then: npm run release"
+Write-Host "Check the CHANGELOG.md entry, commit (git commit -am `"Release v$new`"), then push main (npm run release, or GitHub Desktop) - the Release workflow tags and publishes"

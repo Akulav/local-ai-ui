@@ -2,10 +2,14 @@
 
 All notable changes to Lumen. The format follows [Keep a Changelog](https://keepachangelog.com/),
 versions follow [Semantic Versioning](https://semver.org/). Note changes under **[Unreleased]** as you go;
-`npm run version:bump [patch|minor|major|x.y.z]` turns that section into the new version, and `npm run release`
-tags it so GitHub Actions builds and publishes the release.
+`npm run version:bump [patch|minor|major|x.y.z]` turns that section into the new version; once that commit is
+pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
+
+### Changed
+- Releases publish automatically: pushing a new `package.json` version to `main` makes the Release workflow
+  create the `vX.Y.Z` tag, build and publish. No local tag push (or GitHub sign-in from the terminal) needed.
 
 ## [0.3.0] - 2026-11-04
 
