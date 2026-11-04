@@ -7,6 +7,26 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-05
+
+### Added
+- Code review tools the model uses on its own in project chats: `grep` (exact/regex search with context lines),
+  `file_outline` (functions, classes and other definitions with line numbers), `find_symbol` (definitions and every
+  usage of an identifier), `compare_files`, `git_status` and `git_diff` (uncommitted, staged or against a
+  branch/commit; works with Git for Windows or the git bundled with GitHub Desktop).
+- `run_command`: the model can run the project's own tests, linter, type-checker or build. Every command waits for
+  your OK in the chat (Run / Always in this chat / Deny); git asks the same way. Runs without a console window, is
+  killed with its child processes on timeout or Stop, and its output comes back to the model.
+- Code review card: the model reports findings with file, line, severity, problem and fix, sorted by severity
+  with the offending line shown; copy the whole review as Markdown.
+- General tools in every chat: `calculate` (exact arithmetic and math functions) and `current_datetime`.
+- The system prompt now tells the model when to review code by itself (scope with git, read callers, run checks,
+  then report findings).
+
+### Changed
+- Diff cards without an Undo (git diffs, file comparisons) no longer show the button, and the stray empty last
+  line in diff cards is gone.
+
 ## [0.5.0] - 2026-11-04
 
 ### Added

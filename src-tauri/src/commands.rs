@@ -232,6 +232,15 @@ pub fn undo_change(state: S, backup_id: String) -> R<String> {
     tools::undo(&state, &backup_id).map_err(e)
 }
 
+/// The user's answer to a tool that wants to run a process: "allow", "always" (this chat) or "deny".
+#[tauri::command]
+pub fn confirm_tool(state: S, id: String, decision: String) {
+    if let Some(tx) = state.approvals.lock().remove(&id) {
+        let d = if matches!(decision.as_str(), "allow" | "always") { decision } else { "deny".into() };
+        let _ = tx.send(d);
+    }
+}
+
 // ---------------- projects ----------------
 
 #[tauri::command]

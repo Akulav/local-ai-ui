@@ -57,6 +57,12 @@ const ICONS = {
   power: '<path d="M18.4 6.6a9 9 0 1 1-12.8 0M12 2v10"/>',
   play: '<path d="m6 4 14 8-14 8z"/>',
   layers: '<path d="m12 2 10 6-10 6L2 8z"/><path d="m2 16 10 6 10-6"/>',
+  git: '<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 8.5v7M18 11.5c0 4-6 2.5-10.3 5.3"/>',
+  terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/>',
+  calc: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h.01M12 11h.01M16 11h.01M8 15h.01M12 15h.01M16 15h.01M8 18h.01M12 18h.01M16 18h.01"/>',
+  code: '<path d="m8 7-5 5 5 5M16 7l5 5-5 5"/>',
+  shield: '<path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/>',
+  diff: '<path d="M6 3v12M3 6h6M15 18h6"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>',
 };
 const icon = (n, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24">${ICONS[n] || ""}</svg>`;
 
@@ -73,6 +79,7 @@ const S = {
   drafts: {}, // unsent composer text per chat id ("" = no chat yet)
   updates: {}, // from updater.rs: { current, app: {version,url}|null, runtime: tag|null, runtime_current, checking, installing, error }
   lastPromptTps: 0, engineOpen: false,
+  confirms: {}, // tool_confirm requests still waiting for the user's answer, by id
 };
 /** Translate key `k` in the current UI language (falls back to English), filling {placeholders}. */
 const t = (k, vars) => {
@@ -467,6 +474,8 @@ function renderChat() {
     if (m.compressed && !S.showOld) continue;
     turn = placeMessage(th, m, turn);
   }
+  // a tool may still be waiting for permission (e.g. after switching chats)
+  Object.values(S.confirms).filter((p) => p.chat_id === S.chatId).forEach(showConfirm);
   markLastTurn();
 }
 /** Adds a message element to the thread; returns the current assistant turn element (or null). */
@@ -606,12 +615,85 @@ function assistantEl(m) {
   return n;
 }
 
-const TOOL_LABEL = { search_project: "toolSearch", list_files: "toolList", read_file: "toolRead", write_file: "toolWrite", edit_file: "toolEdit", web_search: "toolWeb", fetch_url: "toolFetch" };
-const TOOL_ICON = { search_project: "search", list_files: "list", read_file: "file", write_file: "edit", edit_file: "edit", web_search: "globe", fetch_url: "link" };
+const TOOL_LABEL = {
+  search_project: "toolSearch", list_files: "toolList", read_file: "toolRead", write_file: "toolWrite", edit_file: "toolEdit", web_search: "toolWeb", fetch_url: "toolFetch",
+  grep: "toolGrep", file_outline: "toolOutline", find_symbol: "toolSymbol", compare_files: "toolCompare", git_status: "toolGitStatus", git_diff: "toolGitDiff",
+  run_command: "toolRun", report_findings: "toolFindings", calculate: "toolCalc", current_datetime: "toolTime",
+};
+const TOOL_ICON = {
+  search_project: "search", list_files: "list", read_file: "file", write_file: "edit", edit_file: "edit", web_search: "globe", fetch_url: "link",
+  grep: "search", file_outline: "code", find_symbol: "code", compare_files: "diff", git_status: "git", git_diff: "git",
+  run_command: "terminal", report_findings: "shield", calculate: "calc", current_datetime: "clock",
+};
 function toolArgSummary(name, argsRaw) {
   let a = {};
   try { a = JSON.parse(argsRaw || "{}"); } catch {}
-  return a.query || a.path || a.url || "";
+  if (name === "compare_files") return [a.path_a, a.path_b].filter(Boolean).join(" ↔ ");
+  if (name === "git_diff") return [a.base, a.staged ? "--staged" : "", a.path].filter(Boolean).join(" ");
+  if (name === "grep") return (a.pattern || "") + (a.glob ? `  (${a.glob})` : "");
+  return a.query || a.command || a.expression || a.name || a.path || a.url || "";
+}
+const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
+/** Code-review card from report_findings: counts per severity, then one row per finding. */
+function findingsEl(d, m) {
+  const list = d.findings || [];
+  const counts = SEV_ORDER.filter((s) => d.counts?.[s]).map((s) => `<span class="sev sev-${s}">${d.counts[s]} ${esc(t("sev_" + s))}</span>`).join("");
+  const n = el(`<div class="review" data-call="${esc(m.meta?.tool_call_id || "")}"><div class="review-h">${icon("shield")}<span class="name">${esc(t("reviewTitle"))}</span><span class="counts">${counts || `<span class="sev sev-info">${esc(t("reviewClean"))}</span>`}</span><span class="spacer"></span><button data-a="copy" title="${esc(t("copy"))}">${icon("copy")}</button></div>${d.summary ? `<div class="review-sum"></div>` : ""}<div class="review-list"></div></div>`);
+  if (d.summary) n.querySelector(".review-sum").textContent = d.summary;
+  const box = n.querySelector(".review-list");
+  for (const f of list) {
+    const loc = f.path ? `${f.path}${f.line ? ":" + f.line : ""}` : "";
+    const row = el(`<div class="finding"><div class="finding-h"><span class="sev sev-${esc(f.severity)}">${esc(t("sev_" + f.severity))}</span><span class="ft"></span>${loc ? `<span class="chip">${icon("file")}${esc(loc)}</span>` : ""}</div>${f.code ? `<pre class="fcode"></pre>` : ""}${f.detail ? `<div class="fd"></div>` : ""}${f.suggestion ? `<div class="fs"><b>${esc(t("reviewFix"))}</b> <span></span></div>` : ""}</div>`);
+    row.querySelector(".ft").textContent = f.title;
+    if (f.code) row.querySelector(".fcode").textContent = f.code;
+    if (f.detail) row.querySelector(".fd").textContent = f.detail;
+    if (f.suggestion) row.querySelector(".fs span").textContent = f.suggestion;
+    box.appendChild(row);
+  }
+  n.querySelector('[data-a="copy"]').onclick = () => {
+    const md = list.map((f) => `- **[${f.severity}]** ${f.title}${f.path ? ` (\`${f.path}${f.line ? ":" + f.line : ""}\`)` : ""}${f.detail ? `\n  ${f.detail}` : ""}${f.suggestion ? `\n  ${t("reviewFix")} ${f.suggestion}` : ""}`).join("\n");
+    navigator.clipboard.writeText((d.summary ? d.summary + "\n\n" : "") + md); toast(t("copied"));
+  };
+  return n;
+}
+/** git_diff result: one read-only diff card per file (no Undo: git owns those changes). */
+function gitDiffEl(d, m) {
+  const files = d.files || [];
+  const n = el(`<div class="tool gitdiff open" data-call="${esc(m.meta?.tool_call_id || "")}"><div class="tool-h">${icon("git")}<span class="name">${esc(t("toolGitDiff"))}</span><span class="arg">${esc(t("gitFiles", { n: files.length }))} · <span class="n-add">+${d.added || 0}</span> <span class="n-del">−${d.removed || 0}</span></span><span class="st">${icon("check", "ok-ic")}${icon("chevron")}</span></div><div class="gd-body"></div></div>`);
+  const body = n.querySelector(".gd-body");
+  if (!files.length) body.appendChild(el(`<div class="muted-note">${esc(t("gitNoChanges"))}</div>`));
+  for (const f of files) {
+    const card = diffEl({ path: f.path, created: f.created, added: f.added, removed: f.removed, diff: f.diff || "" }, m);
+    if (f.clipped || !f.diff) card.querySelector(".diff-body").appendChild(el(`<div class="muted-note">${esc(t("gitDiffClipped"))}</div>`));
+    if (files.length > 3) { card.querySelector(".diff-body").classList.add("collapsed"); card.querySelector('[data-a="toggle"] span').textContent = t("expand"); }
+    body.appendChild(card);
+  }
+  if (d.untracked?.length) {
+    const u = el(`<div class="hits"></div>`);
+    u.innerHTML = `<span class="muted-note">${esc(t("gitUntracked"))}</span>` + d.untracked.slice(0, 30).map((p) => `<span class="chip">${icon("file")}${esc(p)}</span>`).join("");
+    body.appendChild(u);
+  }
+  n.querySelector(".tool-h").onclick = () => n.classList.toggle("open");
+  return n;
+}
+/** The "allow this process?" prompt shown on a running git / run_command tool. */
+function confirmEl(p) {
+  const n = el(`<div class="confirm" data-confirm="${esc(p.id)}"><div class="confirm-q">${icon(p.scope === "git" ? "git" : "terminal")}<span>${esc(t(p.scope === "git" ? "confirmGit" : "confirmRun"))}</span></div><pre class="confirm-cmd"></pre><div class="confirm-cwd"></div><div class="confirm-b"><button class="btn primary" data-d="allow">${icon("play")}${esc(t("confirmAllow"))}</button><button class="btn" data-d="always">${esc(t("confirmAlways"))}</button><button class="btn" data-d="deny">${icon("x")}${esc(t("confirmDeny"))}</button></div></div>`);
+  n.querySelector(".confirm-cmd").textContent = p.command;
+  n.querySelector(".confirm-cwd").textContent = t("confirmIn", { dir: p.cwd });
+  n.querySelector(".confirm-b").onclick = async (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    n.querySelectorAll("button").forEach((x) => (x.disabled = true));
+    await call("confirm_tool", { id: p.id, decision: b.dataset.d });
+  };
+  return n;
+}
+function showConfirm(p) {
+  $(`#thread [data-confirm="${p.id}"]`)?.remove();
+  const host = $(`#thread .tool[data-call="${p.call_id}"]`);
+  if (host) host.appendChild(confirmEl(p));
+  else currentTurn(true).querySelector(".turn-body").appendChild(confirmEl(p));
+  scrollBottom(true);
 }
 function runningToolEl(id, name, args) {
   return el(`<div class="tool" data-call="${esc(id)}"><div class="tool-h">${icon(TOOL_ICON[name] || "bolt")}<span class="name">${esc(t(TOOL_LABEL[name] || name))}</span><span class="arg">${esc(toolArgSummary(name, args))}</span><span class="st"><span class="spinner"></span></span></div></div>`);
@@ -620,6 +702,8 @@ function toolEl(m) {
   const d = m.meta?.display || {};
   const name = m.meta?.name || "tool";
   if (d.kind === "diff") return diffEl(d, m);
+  if (d.kind === "findings") return findingsEl(d, m);
+  if (d.kind === "gitdiff") return gitDiffEl(d, m);
   const n = el(`<div class="tool" data-call="${esc(m.meta?.tool_call_id || "")}"><div class="tool-h">${icon(TOOL_ICON[name] || "bolt")}<span class="name">${esc(t(TOOL_LABEL[name] || name))}</span><span class="arg">${esc(toolArgSummary(name, m.meta?.arguments))}${d.lines ? " · " + esc(d.lines) : ""}</span><span class="st">${m.meta?.ok ? icon("check", "ok-ic") : icon("x", "bad-ic")}${icon("chevron")}</span></div><div class="tool-b"></div></div>`);
   n.querySelector(".tool-b").textContent = m.content.length > 20000 ? m.content.slice(0, 20000) + "\n…" : m.content;
   if (d.kind === "search" && d.hits?.length) {
@@ -632,15 +716,32 @@ function toolEl(m) {
     h.innerHTML = d.hits.slice(0, 8).map((x) => `<a class="chip" href="${esc(x.url)}">${icon("globe")}${esc(x.title)}</a>`).join("");
     n.insertBefore(h, n.querySelector(".tool-b"));
   }
+  // short inline result next to the tool name
+  const res = { calc: () => `= ${d.result}`, datetime: () => d.text, grep: () => t("grepCount", { n: d.matches, f: d.files }),
+    symbol: () => t("symbolCount", { d: d.defs, r: d.refs }), outline: () => t("outlineCount", { n: d.count }),
+    git_status: () => `${d.branch ? d.branch.split("...")[0] + " · " : ""}${t("gitFiles", { n: d.count })}`,
+    command: () => d.timed_out ? t("cmdTimeout") : `${t("cmdExit", { c: d.code ?? "?" })} · ${(d.secs || 0).toFixed(1)} s` }[d.kind];
+  if (res) n.querySelector(".tool-h .arg").insertAdjacentHTML("afterend", `<span class="res ${d.kind === "command" && !d.ok ? "bad" : ""}">${esc(res())}</span>`);
+  if ((d.kind === "grep" || d.kind === "symbol") && d.hits?.length) {
+    const h = el(`<div class="hits"></div>`);
+    h.innerHTML = d.hits.slice(0, 12).map((x) => `<span class="chip">${icon(x.def ? "code" : "file")}${esc(x.path)}:${esc(x.lines)}</span>`).join("");
+    n.insertBefore(h, n.querySelector(".tool-b"));
+  }
+  if (d.kind === "git_status" && d.files?.length) {
+    const h = el(`<div class="hits"></div>`);
+    h.innerHTML = d.files.slice(0, 16).map((x) => `<span class="chip"><b class="gst">${esc(x.status)}</b>${esc(x.path)}</span>`).join("");
+    n.insertBefore(h, n.querySelector(".tool-b"));
+  }
+  if (d.kind === "command") n.classList.add("cmd");
   n.querySelector(".tool-h").onclick = () => n.classList.toggle("open");
   return n;
 }
 /** Renders a unified diff (from tools.rs) as a two-gutter, colored card with Hide / Undo. */
 function diffEl(d, m) {
-  const n = el(`<div class="diff" data-call="${esc(m.meta?.tool_call_id || "")}"><div class="diff-h">${icon("file")}<span class="path">${esc(d.path)}</span>${d.created ? `<span class="badge new">${t("created")}</span>` : ""}<span class="n-add">+${d.added}</span><span class="n-del">−${d.removed}</span><span class="spacer"></span><button data-a="toggle">${icon("chevron")}<span>${t("collapse")}</span></button><button data-a="undo">${icon("undo")}${t("undo")}</button></div><div class="diff-body"></div></div>`);
+  const n = el(`<div class="diff" data-call="${esc(m.meta?.tool_call_id || "")}"><div class="diff-h">${icon("file")}<span class="path">${esc(d.path)}</span>${d.created ? `<span class="badge new">${t("created")}</span>` : ""}<span class="n-add">+${d.added}</span><span class="n-del">−${d.removed}</span><span class="spacer"></span><button data-a="toggle">${icon("chevron")}<span>${t("collapse")}</span></button>${d.backup ? `<button data-a="undo">${icon("undo")}${t("undo")}</button>` : ""}</div><div class="diff-body"></div></div>`);
   const body = n.querySelector(".diff-body");
   let oldN = 0, newN = 0, html = "";
-  for (const line of (d.diff || "").split("\n")) {
+  for (const line of (d.diff || "").replace(/\n$/, "").split("\n")) {
     if (line.startsWith("---") || line.startsWith("+++")) continue;
     if (line.startsWith("@@")) {
       const mm = /@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
@@ -1306,6 +1407,13 @@ listen("chat-event", (e) => {
     case "assistant_done": flushLive(); finishLive(p); break;
     case "assistant_failed": if (S.live) { S.live.seg.remove(); S.live = null; } break;
     case "tool_start": currentTurn(true).querySelector(".turn-body").appendChild(runningToolEl(p.id, p.name, p.arguments)); scrollBottom(); break;
+    case "tool_confirm": S.confirms[p.id] = p; showConfirm(p); break;
+    case "tool_confirmed": {
+      delete S.confirms[p.id];
+      const n = $(`#thread [data-confirm="${p.id}"]`);
+      if (n) n.outerHTML = `<div class="confirm done">${icon(p.decision === "deny" ? "x" : "check")}${esc(t(p.decision === "deny" ? "confirmDenied" : "confirmAllowed"))}</div>`;
+      break;
+    }
     case "error": {
       if (S.live) { S.live.seg.remove(); S.live = null; }
       $("#thread").appendChild(el(`<div class="err-box">${icon("warn")} ${esc(p.error)}</div>`));

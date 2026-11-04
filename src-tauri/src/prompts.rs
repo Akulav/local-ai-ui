@@ -35,6 +35,14 @@ pub fn custom_instructions(text: &str) -> String {
     format!("\n\n# Custom instructions from the user\nFollow these unless a request explicitly overrides them.\n{text}")
 }
 
+pub const GENERAL_TOOLS: &str = r#"
+
+# Tools
+Call tools on your own whenever they make the answer more accurate; do not ask for permission first and do not announce that you are about to use one.
+- `calculate` – use it for any arithmetic beyond trivial mental math (money, units, percentages, statistics) instead of computing in your head.
+- `current_datetime` – use it when the answer depends on the current time, weekday or time zone.
+- `report_findings` – when you review code (the user asks to review, check, audit or find bugs, or pastes code and asks what is wrong), present the issues with this tool: one call with every finding (path, line, severity, title, detail, suggestion), then a short overview in text. Severity: critical = data loss / security / crash, high = wrong behaviour, medium = edge-case bug or risky code, low = maintainability, info = nit."#;
+
 pub const WEB_TOOLS: &str = r#"
 # Web access
 You can call `web_search` and `fetch_url` when the question needs current or niche information. Cite the sources you used as Markdown links. Do not search for things you already know well."#;
@@ -54,6 +62,21 @@ You are working inside the project **{name}** (folder: `{folder}`). You can read
 - `read_file` – read a file (optionally a line range). Always read a file before editing it.
 - `edit_file` – replace an exact snippet of a file (preferred for small changes; `old_text` must match exactly once).
 - `write_file` – create a new file or fully overwrite one (use for new files or full rewrites).
+- `grep` – exact text / regex search with line numbers and context (identifiers, error messages, TODOs).
+- `file_outline` – the functions, classes and other definitions of a file with line numbers.
+- `find_symbol` – where an identifier is defined and every place it is used.
+- `compare_files` – a diff between two files.
+- `git_status` / `git_diff` – changed files, recent commits and the diff of uncommitted changes (or against a branch / commit).
+- `run_command` – run the project's own tests, linter, type-checker or build; the user approves the exact command first.
+
+# Code review workflow
+Use it without being asked whenever the user wants code reviewed, checked or explained for bugs, asks "what did I change", "is this ready", "why does X fail", or before you call your own work done:
+1. Scope: for changes, call `git_status`, then `git_diff` (with `base` for a branch); for a file or feature, use `file_outline` + `read_file`.
+2. Understand: read the surrounding code, and use `find_symbol` / `grep` to check callers, other usages and similar code before you claim something is wrong.
+3. Verify: when the project has tests, a linter or a type-checker (look for package.json scripts, Cargo.toml, pyproject.toml, Makefile…), offer to run it with `run_command`; use the real output, never guess results.
+4. Report: call `report_findings` once with every real, specific issue (correctness and security first, then robustness, then style), each tied to a file and line you actually read. Do not report speculation or pure preferences as bugs. Then write a short overview; if there are no issues, say so.
+5. Fix only when asked (or when the user asked you to "fix" from the start), with `edit_file`.
+If a process tool is declined, continue with the file tools instead of retrying.
 
 Rules:
 1. Ground every claim about the project in files you actually retrieved; mention the file path (and lines) you rely on, e.g. `src/main.rs:42`.

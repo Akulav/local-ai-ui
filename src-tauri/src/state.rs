@@ -158,6 +158,10 @@ pub struct AppState {
     pub last_activity: AtomicI64,
     pub updates: RwLock<UpdateInfo>,
     pub quitting: AtomicBool,
+    /// Tool calls that wait for the user to allow a process (git, checks): confirm id → answer.
+    pub approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
+    /// Per chat, the process scopes ("git", "run") the user allowed for the rest of the session.
+    pub allowed_tools: Mutex<HashMap<String, std::collections::HashSet<String>>>,
 }
 
 impl AppState {
@@ -187,6 +191,8 @@ impl AppState {
             last_activity: AtomicI64::new(now_ms()),
             updates: RwLock::new(UpdateInfo::default()),
             quitting: AtomicBool::new(false),
+            approvals: Mutex::new(HashMap::new()),
+            allowed_tools: Mutex::new(HashMap::new()),
         })
     }
 

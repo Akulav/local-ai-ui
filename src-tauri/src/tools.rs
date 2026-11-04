@@ -3,15 +3,19 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
+use crate::codetools;
 use crate::db::Project;
 use crate::state::{new_id, AppState};
 
 pub struct ToolCtx<'a> {
     pub app: &'a AppHandle,
     pub project: Option<&'a Project>,
+    pub chat_id: &'a str,
+    pub cancel: &'a AtomicBool,
 }
 
 pub struct ToolOutput {
@@ -27,7 +31,35 @@ fn func(name: &str, desc: &str, params: Value) -> Value {
 }
 
 pub fn definitions(project: bool, web: bool) -> Vec<Value> {
-    let mut v = Vec::new();
+    let mut v = vec![
+        func(
+            "calculate",
+            "Evaluate an arithmetic expression exactly instead of computing it in your head. Supports + - * / % ^ (or **), parentheses, !, pi, e and functions sqrt, cbrt, abs, sin, cos, tan, asin, acos, atan, atan2, ln, log (log10, or log(x, base)), log2, exp, floor, ceil, round (round(x, digits)), min, max, sum, avg, pow, hypot, deg, rad. Trigonometry uses radians.",
+            json!({"type": "object", "properties": {
+                "expression": {"type": "string", "description": "e.g. (1250 * 1.19) / 12 or sqrt(2)^3"}
+            }, "required": ["expression"]}),
+        ),
+        func(
+            "current_datetime",
+            "Get the user's current local date, time, weekday and time zone.",
+            json!({"type": "object", "properties": {}}),
+        ),
+        func(
+            "report_findings",
+            "Present code-review findings to the user as a structured review card (sorted by severity, with the code line shown). Call it once at the end of a review with all findings; then write only a short overview.",
+            json!({"type": "object", "properties": {
+                "summary": {"type": "string", "description": "One or two sentences: overall assessment of the reviewed code"},
+                "findings": {"type": "array", "items": {"type": "object", "properties": {
+                    "path": {"type": "string", "description": "File path relative to the project root"},
+                    "line": {"type": "integer", "description": "1-based line number the issue is on"},
+                    "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+                    "title": {"type": "string", "description": "Short statement of the problem"},
+                    "detail": {"type": "string", "description": "Why it is a problem / when it breaks"},
+                    "suggestion": {"type": "string", "description": "Concrete fix"}
+                }, "required": ["title", "severity"]}}
+            }, "required": ["findings"]}),
+        ),
+    ];
     if project {
         v.push(func(
             "search_project",
@@ -70,6 +102,65 @@ pub fn definitions(project: bool, web: bool) -> Vec<Value> {
                 "path": {"type": "string"},
                 "content": {"type": "string"}
             }, "required": ["path", "content"]}),
+        ));
+        v.push(func(
+            "grep",
+            "Exact text or regex search through the project's files, returning every matching line with line numbers and surrounding context. Use it for identifiers, error messages, TODOs and usages (search_project is better for concepts).",
+            json!({"type": "object", "properties": {
+                "pattern": {"type": "string", "description": "Text to find (literal unless regex is true)"},
+                "regex": {"type": "boolean", "description": "Treat pattern as a regular expression (Rust regex syntax), default false"},
+                "case_sensitive": {"type": "boolean", "description": "Default false"},
+                "whole_word": {"type": "boolean", "description": "Match whole words only, default false"},
+                "path": {"type": "string", "description": "Sub-folder or file to search, default the whole project"},
+                "glob": {"type": "string", "description": "File filter such as *.rs or src/**/*.ts (comma-separated for several)"},
+                "context": {"type": "integer", "description": "Context lines before and after each match, default 2"},
+                "max_results": {"type": "integer", "description": "Max matching lines, default 60"}
+            }, "required": ["pattern"]}),
+        ));
+        v.push(func(
+            "file_outline",
+            "List the definitions in a file (functions, classes, structs, methods, headings…) with line numbers, to get its structure before reading the parts that matter.",
+            json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+        ));
+        v.push(func(
+            "find_symbol",
+            "Find where an identifier (function, type, variable, constant) is defined and every place it is used across the project. Use it to check the callers before changing a signature, and to follow code during a review.",
+            json!({"type": "object", "properties": {
+                "name": {"type": "string", "description": "Exact identifier, case-sensitive"},
+                "path": {"type": "string", "description": "Limit to a sub-folder, default the whole project"},
+                "glob": {"type": "string", "description": "File filter such as *.py"}
+            }, "required": ["name"]}),
+        ));
+        v.push(func(
+            "compare_files",
+            "Show the differences between two project files as a unified diff.",
+            json!({"type": "object", "properties": {
+                "path_a": {"type": "string"},
+                "path_b": {"type": "string"}
+            }, "required": ["path_a", "path_b"]}),
+        ));
+        v.push(func(
+            "git_status",
+            "Show the git branch, the changed / staged / untracked files and the latest commits of the project. The user is asked to allow it first.",
+            json!({"type": "object", "properties": {}}),
+        ));
+        v.push(func(
+            "git_diff",
+            "Show the git diff of the project: uncommitted changes by default, staged changes, or the changes since a revision (branch, tag, commit, HEAD~3). The user is asked to allow it first.",
+            json!({"type": "object", "properties": {
+                "path": {"type": "string", "description": "Limit to a file or folder"},
+                "staged": {"type": "boolean", "description": "Only staged changes"},
+                "base": {"type": "string", "description": "Compare against this revision, e.g. main or HEAD~1 (use A...B for a branch range)"}
+            }}),
+        ));
+        v.push(func(
+            "run_command",
+            "Run one of the project's own check commands in the project folder (tests, linter, type-checker, build), e.g. `cargo test`, `npm test`, `pytest -q`, `ruff check .`, `tsc --noEmit`. Runs through cmd.exe on Windows. The user sees the exact command and must allow it; never use it to modify, delete, install or download anything.",
+            json!({"type": "object", "properties": {
+                "command": {"type": "string", "description": "Single command line"},
+                "cwd": {"type": "string", "description": "Sub-folder to run in, default the project root"},
+                "timeout_sec": {"type": "integer", "description": "Default 180, max 900"}
+            }, "required": ["command"]}),
         ));
     }
     if web {
@@ -127,10 +218,7 @@ pub fn tree(folder: &Path, sub: &str, depth: usize, max_entries: usize) -> Strin
         .git_ignore(true)
         .max_depth(Some(depth))
         .sort_by_file_name(|a, b| a.cmp(b))
-        .filter_entry(|e| {
-            let n = e.file_name().to_string_lossy();
-            !matches!(n.as_ref(), "node_modules" | ".git" | "target" | "__pycache__" | ".venv" | "venv" | "dist" | "build" | "LumenData")
-        })
+        .filter_entry(|e| !codetools::SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref()))
         .build();
     for e in walker.flatten().skip(1) {
         let d = e.depth();
@@ -194,9 +282,9 @@ fn diff_display(rel: &str, old: &str, new: &str, created: bool, backup_id: &str)
 
 /// Executes one tool call. Errors are returned to the model as text (so it can retry) instead of
 /// aborting the turn.
-pub async fn run(ctx: &ToolCtx<'_>, name: &str, args_raw: &str) -> ToolOutput {
+pub async fn run(ctx: &ToolCtx<'_>, call_id: &str, name: &str, args_raw: &str) -> ToolOutput {
     let args: Value = serde_json::from_str(args_raw).unwrap_or_else(|_| json!({}));
-    match run_inner(ctx, name, &args).await {
+    match run_inner(ctx, call_id, name, &args).await {
         Ok(o) => o,
         Err(e) => ToolOutput { content: format!("Error: {e}"), display: json!({"kind": "error", "error": e.to_string()}), ok: false },
     }
@@ -206,10 +294,85 @@ fn s<'a>(v: &'a Value, k: &str) -> Result<&'a str> {
     v[k].as_str().ok_or_else(|| anyhow!("missing argument `{k}`"))
 }
 
-async fn run_inner(ctx: &ToolCtx<'_>, name: &str, a: &Value) -> Result<ToolOutput> {
+fn out((content, display): (String, Value)) -> ToolOutput {
+    ToolOutput { content, display, ok: true }
+}
+
+/// Runs blocking file work (walks, regex over many files) off the async runtime.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(f).await?
+}
+
+async fn run_inner(ctx: &ToolCtx<'_>, call_id: &str, name: &str, a: &Value) -> Result<ToolOutput> {
     let state = ctx.app.state::<Arc<AppState>>().inner().clone();
     let need_project = || ctx.project.ok_or_else(|| anyhow!("this tool is only available inside a project"));
     match name {
+        "calculate" => {
+            let e = s(a, "expression")?;
+            let v = crate::calc::eval(e)?;
+            let r = crate::calc::format_number(v);
+            Ok(ToolOutput { content: format!("{e} = {r}"), display: json!({"kind": "calc", "expression": e, "result": r}), ok: true })
+        }
+        "current_datetime" => {
+            let (dt, weekday, offset, tz) = crate::calc::local_now();
+            Ok(ToolOutput {
+                content: format!("Local time: {dt} ({weekday}), UTC{offset}, time zone: {tz}"),
+                display: json!({"kind": "datetime", "text": format!("{dt} · {weekday} · UTC{offset}")}),
+                ok: true,
+            })
+        }
+        "report_findings" => {
+            let folder = ctx.project.map(|p| p.folder.clone());
+            let a = a.clone();
+            blocking(move || codetools::findings(folder.as_deref(), &a)).await.map(out)
+        }
+        "grep" => {
+            let p = need_project()?;
+            let args = codetools::GrepArgs {
+                pattern: s(a, "pattern")?.to_string(),
+                regex: a["regex"].as_bool().unwrap_or(false),
+                case_sensitive: a["case_sensitive"].as_bool().unwrap_or(false),
+                whole_word: a["whole_word"].as_bool().unwrap_or(false),
+                path: a["path"].as_str().unwrap_or("").to_string(),
+                glob: a["glob"].as_str().map(String::from),
+                context: a["context"].as_u64().unwrap_or(2).min(10) as usize,
+                max_results: a["max_results"].as_u64().unwrap_or(60).clamp(1, 300) as usize,
+            };
+            if args.pattern.is_empty() {
+                return Err(anyhow!("pattern is empty"));
+            }
+            let folder = p.folder.clone();
+            blocking(move || codetools::grep(&folder, &args)).await.map(out)
+        }
+        "file_outline" => {
+            let p = need_project()?;
+            let (folder, path) = (p.folder.clone(), s(a, "path")?.to_string());
+            blocking(move || codetools::outline(&folder, &path)).await.map(out)
+        }
+        "find_symbol" => {
+            let p = need_project()?;
+            let (folder, sym) = (p.folder.clone(), s(a, "name")?.to_string());
+            let path = a["path"].as_str().unwrap_or("").to_string();
+            let glob = a["glob"].as_str().map(String::from);
+            blocking(move || codetools::find_symbol(&folder, &sym, &path, glob.as_deref())).await.map(out)
+        }
+        "compare_files" => {
+            let p = need_project()?;
+            let (folder, x, y) = (p.folder.clone(), s(a, "path_a")?.to_string(), s(a, "path_b")?.to_string());
+            blocking(move || codetools::compare(&folder, &x, &y)).await.map(out)
+        }
+        "git_status" | "git_diff" | "run_command" => {
+            let p = need_project()?;
+            let g = codetools::GitCtx { app: ctx.app, chat_id: ctx.chat_id, call_id, folder: &p.folder, cancel: ctx.cancel };
+            let r = match name {
+                "git_status" => codetools::git_status(&g).await?,
+                "git_diff" => codetools::git_diff(&g, a).await?,
+                _ => codetools::run_command(&g, a).await?,
+            };
+            // a failing check is still a successful tool call, but mark it red in the UI
+            let ok = r.1["ok"].as_bool().unwrap_or(true);
+            Ok(ToolOutput { content: r.0, display: r.1, ok })
+        }
         "search_project" => {
             let p = need_project()?;
             let q = s(a, "query")?;

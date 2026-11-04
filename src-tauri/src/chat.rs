@@ -53,6 +53,7 @@ pub fn system_prompt(state: &AppState, chat: &Chat, project: Option<&Project>, w
     };
     let mut sys = prompts::base(&lang, &today());
     sys.push_str(&prompts::custom_instructions(&custom));
+    sys.push_str(prompts::GENERAL_TOOLS);
     if web {
         sys.push_str(prompts::WEB_TOOLS);
     }
@@ -300,7 +301,7 @@ pub fn gen_params(state: &AppState, think: bool) -> Value {
 async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, think: bool, web: bool, cancel: &AtomicBool) -> Result<()> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let defs = tools::definitions(project.is_some(), web);
-    let ctx = ToolCtx { app, project };
+    let ctx = ToolCtx { app, project, chat_id, cancel };
     for _ in 0..24 {
         let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?;
         let messages = build_messages(&state, &chat, project, web)?;
@@ -318,7 +319,7 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
                 break;
             }
             emit(app, chat_id, "tool_start", json!({"id": tc.id, "name": tc.name, "arguments": tc.arguments}));
-            let out = tools::run(&ctx, &tc.name, &tc.arguments).await;
+            let out = tools::run(&ctx, &tc.id, &tc.name, &tc.arguments).await;
             let meta = json!({"tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments, "display": out.display, "ok": out.ok});
             let m = state.db.add_message(chat_id, "tool", &out.content, "", &meta)?;
             emit(app, chat_id, "message", json!({"message": m}));
@@ -503,7 +504,7 @@ pub fn export_markdown(chat: &Chat, messages: &[Message]) -> String {
             "tool" => {
                 let name = m.meta["name"].as_str().unwrap_or("tool");
                 let args: Value = serde_json::from_str(m.meta["arguments"].as_str().unwrap_or("{}")).unwrap_or_default();
-                let arg = ["path", "query", "url"].iter().find_map(|k| args[*k].as_str()).unwrap_or("");
+                let arg = ["path", "query", "url", "pattern", "name", "command", "expression"].iter().find_map(|k| args[*k].as_str()).unwrap_or("");
                 out.push_str(&format!("\n> Tool `{name}` {arg}\n"));
             }
             _ => {}
