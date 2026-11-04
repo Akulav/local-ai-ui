@@ -7,6 +7,18 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-04
+
+### Added
+- Auto-unload: the model is unloaded after a set idle time to free VRAM (Settings → Engine, default 30 min,
+  or Never). The next message reloads it automatically, and the status bar says why it was unloaded.
+- DuckDuckGo search provider (no API key), now the default for new installs. It uses DuckDuckGo's official
+  Instant Answer API (topic summaries and official sites) and fills the rest with Wikipedia results.
+  Existing installs keep their saved provider; switch in Settings → Web search.
+
+### Fixed
+- Changing a setting after loading a different model no longer resets "Load last model on start" to the old model.
+
 ### Changed
 - Releases publish automatically: pushing a new `package.json` version to `main` makes the Release workflow
   create the `vX.Y.Z` tag, build and publish. No local tag push (or GitHub sign-in from the terminal) needed.

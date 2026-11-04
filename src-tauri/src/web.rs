@@ -28,7 +28,9 @@ pub async fn search(state: &AppState, query: &str, n: usize) -> Result<Vec<Searc
         "brave" if !key.is_empty() => brave(state, &key, query, n).await,
         "tavily" if !key.is_empty() => tavily(state, &key, query, n).await,
         "searxng" if !searx.is_empty() => searxng(state, &searx, query, n).await,
-        _ => wikipedia(state, query, n).await,
+        "wikipedia" => wikipedia(state, query, n).await,
+        // default, and the keyless fallback when a provider is missing its key / URL
+        _ => duckduckgo(state, query, n).await,
     };
     match r {
         Ok(v) if !v.is_empty() => Ok(v),
@@ -98,6 +100,69 @@ async fn searxng(state: &AppState, base: &str, query: &str, n: usize) -> Result<
         .json()
         .await?;
     Ok(hits(v["results"].as_array(), "title", "url", "content", n))
+}
+
+/// DuckDuckGo's official keyless Instant Answer API. It returns topic abstracts (mostly Wikipedia) and
+/// official sites, not general web results, so the remaining slots are filled from Wikipedia search.
+/// (DuckDuckGo has no keyless full-web API; scraping its result pages is not allowed here.)
+async fn duckduckgo(state: &AppState, query: &str, n: usize) -> Result<Vec<SearchHit>> {
+    let v: Result<Value> = async {
+        Ok(state
+            .http
+            .get("https://api.duckduckgo.com/")
+            .header("User-Agent", LUMEN_UA)
+            .query(&[("q", query), ("format", "json"), ("no_html", "1"), ("skip_disambig", "1"), ("t", "lumen")])
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+    .await;
+    let mut out = v.as_ref().map(instant_answer_hits).unwrap_or_default();
+    out.truncate(n);
+    if out.len() < n {
+        match wikipedia(state, query, n).await {
+            Ok(wiki) => {
+                for h in wiki {
+                    if out.len() >= n {
+                        break;
+                    }
+                    if !out.iter().any(|o| o.url == h.url) {
+                        out.push(h);
+                    }
+                }
+            }
+            // keep what DuckDuckGo found; report the error only when there is nothing at all
+            Err(e) if out.is_empty() => return Err(v.err().unwrap_or(e)),
+            Err(_) => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Abstract (with its source page) and official-site results from an Instant Answer response.
+fn instant_answer_hits(v: &Value) -> Vec<SearchHit> {
+    let mut out = Vec::new();
+    let heading = v["Heading"].as_str().unwrap_or_default();
+    if let Some(url) = v["AbstractURL"].as_str().filter(|u| u.starts_with("http")) {
+        let source = v["AbstractSource"].as_str().unwrap_or_default();
+        out.push(SearchHit {
+            title: if source.is_empty() { heading.to_string() } else { format!("{heading} – {source}") },
+            url: url.to_string(),
+            snippet: v["AbstractText"].as_str().unwrap_or_default().to_string(),
+        });
+    }
+    for r in v["Results"].as_array().into_iter().flatten() {
+        let Some(url) = r["FirstURL"].as_str().filter(|u| u.starts_with("http")) else { continue };
+        if out.iter().any(|o| o.url == url) {
+            continue;
+        }
+        let text = strip_tags(r["Text"].as_str().unwrap_or(url));
+        out.push(SearchHit { title: if heading.is_empty() { text.clone() } else { format!("{heading} – {text}") }, url: url.to_string(), snippet: text });
+    }
+    out
 }
 
 async fn wikipedia(state: &AppState, query: &str, n: usize) -> Result<Vec<SearchHit>> {
@@ -265,4 +330,37 @@ fn squeeze(s: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instant_answer_abstract_and_official_site() {
+        // trimmed real response of api.duckduckgo.com for "rust programming language"
+        let v = json!({
+            "Heading": "Rust (programming language)",
+            "AbstractURL": "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            "AbstractSource": "Wikipedia",
+            "AbstractText": "Rust is a general-purpose programming language.",
+            "Results": [
+                {"FirstURL": "https://www.rust-lang.org/", "Text": "<b>Official site</b>"},
+                {"FirstURL": "https://en.wikipedia.org/wiki/Rust_(programming_language)", "Text": "dup"}
+            ],
+            "RelatedTopics": [{"FirstURL": "https://duckduckgo.com/c/Rust", "Text": "topic"}]
+        });
+        let hits = instant_answer_hits(&v);
+        assert_eq!(hits.len(), 2, "abstract + official site, duplicate dropped, DDG topic links ignored");
+        assert_eq!(hits[0].url, "https://en.wikipedia.org/wiki/Rust_(programming_language)");
+        assert_eq!(hits[0].title, "Rust (programming language) – Wikipedia");
+        assert_eq!(hits[1].url, "https://www.rust-lang.org/");
+        assert_eq!(hits[1].snippet, "Official site");
+    }
+
+    #[test]
+    fn instant_answer_empty_for_open_questions() {
+        let v = json!({"Heading": "", "AbstractURL": "", "Results": [], "RelatedTopics": []});
+        assert!(instant_answer_hits(&v).is_empty());
+    }
 }

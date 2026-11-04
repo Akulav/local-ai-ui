@@ -1,12 +1,29 @@
 //! Background sampler for the status bar: llama-server RAM/VRAM plus live and average tokens/s.
 
 use serde_json::json;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::state::AppState;
+use crate::state::{now_ms, AppState};
 use crate::win::{process_ram, GpuMemCounter};
+
+/// Unloads the chat model once it has been ready and unused for `idle_unload_min` minutes.
+/// Never while a chat is generating / compressing / researching (those register in `generations`).
+fn check_idle(app: &AppHandle, state: &AppState) {
+    let minutes = state.settings.read().idle_unload_min;
+    if minutes == 0 || state.info.read().state != "ready" || !state.generations.lock().is_empty() {
+        return;
+    }
+    let idle_ms = now_ms() - state.last_activity.load(Ordering::Relaxed);
+    if idle_ms < minutes as i64 * 60_000 {
+        return;
+    }
+    state.touch(); // do not fire again while the unload is in progress
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move { crate::server::unload_idle(&app, minutes).await });
+}
 
 /// Samples RAM/VRAM of the running llama-server once per second and emits `metrics`.
 pub fn spawn(app: AppHandle) {
@@ -45,6 +62,7 @@ pub fn spawn(app: AppHandle) {
             } else {
                 counter = None;
             }
+            check_idle(&app, &state);
             let live = *state.live_tps.read();
             let avg = model.as_deref().map(|m| state.db.avg_tps(m)).unwrap_or(0.0);
             let _ = app.emit(

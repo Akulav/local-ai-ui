@@ -5,7 +5,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use crate::db::Db;
@@ -79,7 +79,10 @@ pub struct Settings {
     pub semantic_search: bool,
     pub close_to_tray: bool,
     pub autoload_model: bool,
-    /// "wikipedia" (no key) | "brave" | "tavily" | "searxng"
+    /// Unload the chat model after this many idle minutes to free VRAM (0 = never).
+    /// The UI reloads it automatically on the next message.
+    pub idle_unload_min: u32,
+    /// "duckduckgo" (no key) | "wikipedia" (no key) | "brave" | "tavily" | "searxng"
     pub search_provider: String,
     pub search_key: String,
     pub searxng_url: String,
@@ -104,7 +107,8 @@ impl Default for Settings {
             semantic_search: true,
             close_to_tray: true,
             autoload_model: true,
-            search_provider: "wikipedia".into(),
+            idle_unload_min: 30,
+            search_provider: "duckduckgo".into(),
             search_key: String::new(),
             searxng_url: String::new(),
             custom_instructions: String::new(),
@@ -124,6 +128,8 @@ pub struct LlmInfo {
     pub progress: f32,
     pub vram_total: u64,
     pub gpu_name: String,
+    /// Set when the model was unloaded for being idle (minutes), so the UI can say why; 0 otherwise.
+    pub idle_unloaded_min: u32,
 }
 
 pub struct AppState {
@@ -142,6 +148,8 @@ pub struct AppState {
     pub logs: Arc<Mutex<Vec<String>>>,
     /// tokens/s of the generation in flight (for the live status bar)
     pub live_tps: RwLock<f64>,
+    /// Last time the chat model was used (ms), for the idle auto-unload in metrics.rs.
+    pub last_activity: AtomicI64,
     pub quitting: AtomicBool,
 }
 
@@ -169,6 +177,7 @@ impl AppState {
             job: Job::new(),
             logs: Arc::new(Mutex::new(Vec::new())),
             live_tps: RwLock::new(0.0),
+            last_activity: AtomicI64::new(now_ms()),
             quitting: AtomicBool::new(false),
         })
     }
@@ -183,6 +192,11 @@ impl AppState {
     pub fn llm_url(&self) -> Option<String> {
         let info = self.info.read();
         (info.state == "ready").then(|| format!("http://127.0.0.1:{}", info.port))
+    }
+
+    /// Marks the chat model as used now (resets the idle auto-unload timer).
+    pub fn touch(&self) {
+        self.last_activity.store(now_ms(), Ordering::Relaxed);
     }
 
     pub fn log(&self, line: impl Into<String>) {

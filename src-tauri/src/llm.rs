@@ -41,11 +41,24 @@ pub enum Delta<'a> {
 /// closes the connection, which makes llama-server stop generating.
 pub async fn stream_chat(
     state: &AppState,
-    mut body: Value,
+    body: Value,
     cancel: &AtomicBool,
     mut on: impl FnMut(Delta),
 ) -> Result<StreamResult> {
     let base = state.llm_url().ok_or_else(|| anyhow!("No model is loaded. Pick one in Models."))?;
+    state.touch();
+    let r = stream_inner(state, &base, body, cancel, &mut on).await;
+    state.touch(); // the idle timer counts from the end of the last generation
+    r
+}
+
+async fn stream_inner(
+    state: &AppState,
+    base: &str,
+    mut body: Value,
+    cancel: &AtomicBool,
+    on: &mut impl FnMut(Delta),
+) -> Result<StreamResult> {
     body["stream"] = json!(true);
     body["stream_options"] = json!({"include_usage": true});
     body["cache_prompt"] = json!(true);

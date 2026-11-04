@@ -786,9 +786,16 @@ async function send() {
   const text = input.value.trim();
   if (!text || S.busy[S.chatId]) return;
   if (S.info.state !== "ready") {
-    toast(S.info.state === "starting" ? t("loading") : t("noModel"), true);
-    if (!S.models.length) showView("models");
-    return;
+    // unloaded (idle or by hand): bring the last model back, then send
+    const last = S.settings.last_model;
+    if (S.info.state === "stopped" && last && S.models.some((m) => m.file === last)) {
+      toast(t("reloading", { x: shortModel(last) }));
+      try { await call("load_model", { file: last }); } catch { return; }
+    } else {
+      toast(S.info.state === "starting" ? t("loading") : t("noModel"), true);
+      if (!S.models.length) showView("models");
+      return;
+    }
   }
   if (!S.chatId) {
     const c = await call("create_chat", { projectId: null });
@@ -953,6 +960,7 @@ function renderSettings() {
   html += f(t("runtimeVer"), esc(S.runtime || "—"), `<button class="btn" id="updRt">${icon("download")}${t("update")}</button>`);
   html += f(t("ctxSize"), t("ctxSizeHint"), sel("ctx_size", [[0, t("auto")], [8192, "8k"], [16384, "16k"], [32768, "32k"], [65536, "64k"], [131072, "128k"], [262144, "256k"]]));
   html += f(t("kv"), t("kvHint"), sel("kv_cache", [["q8_0", "q8_0"], ["f16", "f16"], ["q4_0", "q4_0"]]));
+  html += f(t("idleUnload"), t("idleUnloadHint"), sel("idle_unload_min", [[0, t("never")], [5, "5 min"], [15, "15 min"], [30, "30 min"], [60, "1 h"], [120, "2 h"]]));
   html += f(t("moe"), t("moeHint"), `<input class="inp" style="min-width:90px;width:90px" type="number" min="0" max="99" data-k="n_cpu_moe" value="${s.n_cpu_moe}"/>`);
   html += `<h3>${icon("sparkle")}${t("chatSection")}</h3>`;
   html += `<div class="field col"><div><label>${t("customInstr")}</label><small>${t("customInstrHint")}</small></div><textarea class="inp" data-k="custom_instructions" placeholder="${esc(t("customInstrPh"))}">${esc(s.custom_instructions || "")}</textarea></div>`;
@@ -961,7 +969,7 @@ function renderSettings() {
   html += f(t("thinkDefault"), "", sw("thinking"));
   html += f(t("semantic"), t("semanticHint"), sw("semantic_search"));
   html += `<h3>${icon("globe")}${t("webSearch")}</h3>`;
-  html += f(t("searchProvider"), t("searchProviderHint"), sel("search_provider", [["wikipedia", t("wikiNoKey")], ["brave", "Brave Search API"], ["tavily", "Tavily"], ["searxng", t("searxSelf")]]));
+  html += f(t("searchProvider"), t("searchProviderHint"), sel("search_provider", [["duckduckgo", t("ddgNoKey")], ["wikipedia", t("wikiNoKey")], ["brave", "Brave Search API"], ["tavily", "Tavily"], ["searxng", t("searxSelf")]]));
   if (s.search_provider === "brave" || s.search_provider === "tavily") {
     const link = s.search_provider === "brave" ? "https://brave.com/search/api/" : "https://tavily.com/";
     html += f(t("apiKey"), `<a href="${link}">${link}</a>`, `<input class="inp" type="password" data-k="search_key" value="${esc(s.search_key)}" placeholder="key"/>`);
@@ -983,7 +991,7 @@ $("#settingsPage").addEventListener("change", async (e) => {
   const k = e.target.dataset.k;
   if (!k) return;
   let v = e.target.type === "checkbox" ? e.target.checked : e.target.value;
-  if (["ctx_size", "n_cpu_moe"].includes(k)) v = parseInt(v || "0", 10);
+  if (["ctx_size", "n_cpu_moe", "idle_unload_min"].includes(k)) v = parseInt(v || "0", 10);
   if (["temperature", "compress_at"].includes(k)) v = parseFloat(v);
   S.settings[k] = v;
   await call("set_settings", { settings: S.settings });
@@ -1090,8 +1098,9 @@ function renderStatus() {
   const vp = vt ? Math.min(100, (m.vram / vt) * 100) : 0;
   const dls = Object.entries(S.downloads).filter(([, p]) => !p.error && p.total);
   const stateLbl = { ready: t("ready"), starting: t("loading"), runtime: t("runtime"), error: t("error"), stopped: t("stopped") }[i.state] || i.state;
+  const msg = i.state === "stopped" && i.idle_unloaded_min ? t("idleUnloaded", { n: i.idle_unloaded_min }) : i.message || "";
   $("#statusbar").innerHTML = `
-    <div class="seg"><span class="dot ${i.state}"></span><b>${esc(stateLbl)}</b>${i.state === "ready" ? `<span>${esc(shortModel(i.model))} · ${fmtK(i.n_ctx)} ctx</span>` : `<span class="msg" title="${esc(i.message)}">${esc(i.message || "")}</span>`}</div>
+    <div class="seg"><span class="dot ${i.state}"></span><b>${esc(stateLbl)}</b>${i.state === "ready" ? `<span>${esc(shortModel(i.model))} · ${fmtK(i.n_ctx)} ctx</span>` : `<span class="msg" title="${esc(msg)}">${esc(msg)}</span>`}</div>
     <div class="spacer"></div>
     ${dls.length ? `<div class="seg">${icon("download")}${dls.map(([id, p]) => `${esc(p.label || id.replace("model:", ""))} ${p.total ? Math.round((p.done / p.total) * 100) : 0}%`).join(" · ")}</div>` : ""}
     <div class="seg tps ${live ? "live" : ""}" title="tokens/s">${icon("bolt")}<b>${tps ? tps.toFixed(1) : "–"}</b> ${t("tps")}</div>
@@ -1104,8 +1113,14 @@ function renderStatus() {
 listen("server-status", (e) => {
   const prev = S.info.state;
   S.info = e.payload;
+  // the backend remembers the loaded model; keep the UI copy in sync so set_settings never writes back a stale one
+  if (S.info.state === "ready" && S.info.model) S.settings.last_model = S.info.model;
   renderStatus(); renderTopbar();
-  if (prev !== S.info.state) { refreshModels(); if (S.info.state === "error") toast(S.info.message, true); }
+  if (prev !== S.info.state) {
+    refreshModels();
+    if (S.info.state === "error") toast(S.info.message, true);
+    if (S.info.state === "stopped" && S.info.idle_unloaded_min) toast(t("idleUnloaded", { n: S.info.idle_unloaded_min }));
+  }
   if (S.view === "models") renderModels();
 });
 listen("metrics", (e) => { S.metrics = e.payload; renderStatus(); });

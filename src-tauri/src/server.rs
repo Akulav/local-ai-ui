@@ -123,7 +123,17 @@ pub async fn stop_llm(app: &AppHandle) {
         i.pid = 0;
         i.port = 0;
         i.message.clear();
+        i.idle_unloaded_min = 0;
     });
+}
+
+/// Frees VRAM after `minutes` without use (called by the metrics sampler). The status keeps the
+/// reason so the UI can explain it; the next message reloads the model (`last_model`).
+pub async fn unload_idle(app: &AppHandle, minutes: u32) {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    state.log(format!("[lumen] unloading the model after {minutes} min idle"));
+    stop_llm(app).await;
+    set_status(app, |i| i.idle_unloaded_min = minutes);
 }
 
 /// Load `model_file` (relative to the models folder). Replaces the running model.
@@ -232,6 +242,7 @@ pub async fn start_llm(app: &AppHandle, model_file: &str) -> Result<()> {
         s.last_model = Some(model_file.into());
     }
     state.save_settings();
+    state.touch();
     set_status(app, |i| {
         i.state = "ready".into();
         i.port = port;

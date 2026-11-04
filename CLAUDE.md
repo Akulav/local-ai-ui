@@ -14,6 +14,20 @@ Tauri 2 shell + Rust backend + plain HTML/CSS/JS UI (no bundler). Inference is d
 - git is not on PATH on the dev machine. Use GitHub Desktop or its bundled
   `%LOCALAPPDATA%\GitHubDesktop\app-*\resources\app\git\cmd\git.exe`.
 
+## Always: bump the version and prove it works
+The owner wants every change to ship as a release. So for **every** change set (feature, fix, cleanup):
+1. Note it under `## [Unreleased]` in `CHANGELOG.md`, then run `npm run version:bump` with
+   `patch` for fixes/cleanup only, `minor` when anything user-visible is added, `major` only when asked.
+   This is not optional and does not need to be asked about.
+2. Verify before saying it is done, and report each result honestly (paste the failure if one fails):
+   - `node --check ui\app.js` and `node --check ui\i18n.js`
+   - every `t("…")` key used in `app.js` exists in both `en` and `ro` in `ui/i18n.js`
+   - `cargo check --locked` **and** `cargo clippy --locked` in `src-tauri` with zero warnings
+   - `scripts\*.ps1` still parse and stay ASCII-only; workflow YAML still parses if you touched it
+   - UI changes: exercise them (browser pane with a mocked `window.__TAURI__` served over http, or the real app)
+   - backend behaviour you can reach without a GPU model (web search, parsing…): call it for real once
+3. Commit as `Release vX.Y.Z: <short summary>`. Pushing (which publishes the release) stays the user's call.
+
 ## Versioning & releases
 - `package.json` is the source of truth. `tauri.conf.json` points at it, so `Cargo.toml` must match (CI fails otherwise).
 - Every user-visible change gets a line under `## [Unreleased]` in `CHANGELOG.md` **in the same commit**
@@ -54,8 +68,8 @@ Tauri 2 shell + Rust backend + plain HTML/CSS/JS UI (no bundler). Inference is d
 ```
 run.bat, scripts/build.ps1   one-click build (toolchain auto-install)
 scripts/bump-version.ps1     version bump; scripts/vendor.js re-copies UI libs into ui/vendor
-scripts/release.ps1          tag + push a release; scripts/release-notes.ps1 extracts CHANGELOG section
-.github/workflows/           ci.yml (checks), release.yml (build + publish on v* tags)
+scripts/release.ps1          pre-release checks + push main; scripts/release-notes.ps1 extracts CHANGELOG section
+.github/workflows/           ci.yml (checks), release.yml (new package.json version on main → tag + build + publish)
 ui/                          index.html, styles.css, app.js (all UI logic), i18n.js (EN/RO strings), vendor/
 src-tauri/src/
   main.rs       app setup, tray, close-to-tray, shutdown of child processes
@@ -91,7 +105,11 @@ tool_start, assistant_done, assistant_failed, compress_progress, compressed, ctx
 - Tool file access must go through `tools::resolve` (keeps paths inside the project folder) and
   `backup()` before writing, so the diff card's Undo works.
 - Web search uses official APIs only. Do not add HTML scraping of search engines or tricks to get
-  around bot checks. Wikipedia requests must send the honest `Lumen/...` User-Agent.
+  around bot checks. Wikipedia and DuckDuckGo requests must send the honest `Lumen/...` User-Agent.
+  The default provider is DuckDuckGo's keyless Instant Answer API (`api.duckduckgo.com`), topped up with
+  Wikipedia; it has no full-web results, and scraping `html.duckduckgo.com` is not allowed.
+- Idle auto-unload: `settings.idle_unload_min` (metrics.rs `check_idle`). Anything that uses the chat model must
+  either register in `state.generations` or call `state.touch()`, or the model can be unloaded under it.
 - All user-facing strings go in `ui/i18n.js` in both `en` and `ro`.
 - Portable data lives in `LumenData/` next to the exe (falls back to `%LOCALAPPDATA%\Lumen`).
 - Target hardware: AMD RX 9070 XT (16 GB) + 32 GB RAM; default model Qwen3.8-27B UD-IQ4_XS.
