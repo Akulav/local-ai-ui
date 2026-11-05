@@ -1,6 +1,7 @@
 # Lumen build script, called by run.bat.
-# Installs whatever is missing (Node.js, Rust, MSVC C++ Build Tools), builds the release exe and
-# drops it into dist\Lumen next to the portable LumenData folder (models/chats are never touched).
+# Installs whatever is missing (Node.js, Rust, MSVC C++ Build Tools), builds the release exe and the
+# NSIS installer, drops the exe into dist\Lumen next to the portable LumenData folder (models/chats are
+# never touched) and the installer into dist\. Mode "quick" skips the installer.
 param([string]$Mode = "run")
 # "Continue": native tools (cargo, rustup) write progress to stderr, which "Stop" would treat as fatal
 # in Windows PowerShell 5.1. Failures are detected through $LASTEXITCODE and explicit checks instead.
@@ -89,8 +90,15 @@ if ($Mode -eq "dev") {
 
 # ---- build -----------------------------------------------------------------
 $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-Step "Building Lumen v$version (release)"
-& npx tauri build --no-bundle
+$quick = $Mode -eq "quick"
+if ($quick) {
+    Step "Building Lumen v$version (release, portable exe only)"
+    & npx tauri build --no-bundle
+} else {
+    # also builds the NSIS installer; the first run downloads the NSIS toolchain (~5 MB) into %LOCALAPPDATA%\tauri
+    Step "Building Lumen v$version (release exe + installer)"
+    & npx tauri build
+}
 if ($LASTEXITCODE -ne 0) { throw "cargo/tauri build failed" }
 
 # ---- package ---------------------------------------------------------------
@@ -106,6 +114,14 @@ Get-Process -Name Lumen -ErrorAction SilentlyContinue | Where-Object { $_.Path -
 }
 Copy-Item "src-tauri\target\release\lumen.exe" $exe -Force
 Ok "$exe"
+
+if (-not $quick) {
+    $setup = Get-ChildItem "src-tauri\target\release\bundle\nsis\Lumen_${version}_x64-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $setup) { throw "the installer was not produced (src-tauri\target\release\bundle\nsis)" }
+    $setupOut = Join-Path $root "dist\$($setup.Name)"
+    Copy-Item $setup.FullName $setupOut -Force
+    Ok "$setupOut  (installer: per-user, no admin rights, Start menu + optional desktop shortcut)"
+}
 
 if ($Mode -ne "build") {
     Step "Launching"

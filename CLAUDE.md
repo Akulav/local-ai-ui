@@ -5,8 +5,12 @@ Tauri 2 shell + Rust backend + plain HTML/CSS/JS UI (no bundler). Inference is d
 `llama-server` child process (llama.cpp, Vulkan build by default) that Lumen downloads and manages.
 
 ## Build & run
-- `run.bat` – installs missing tools (Node, Rust, MSVC Build Tools via winget), builds the release exe,
-  copies it to `dist\Lumen\Lumen.exe`, launches it. `run.bat build` / `dev` / `clean` also exist.
+- `run.bat` – installs missing tools (Node, Rust, MSVC Build Tools via winget), builds the release exe and the
+  NSIS installer, copies them to `dist\Lumen\Lumen.exe` and `dist\Lumen_X.Y.Z_x64-setup.exe`, launches the exe.
+  `run.bat build` (no launch) / `quick` (exe only, no installer) / `dev` / `clean` also exist.
+- Installer: `bundle.windows.nsis` in `tauri.conf.json`; assets in `src-tauri\installer\` (Romanian.nsh strings,
+  hooks.nsh that removes LumenData on uninstall when "delete app data" is ticked, header/sidebar BMPs made by
+  `scripts\installer-images.ps1` from `icons\source.png`).
 - Manual: `npm ci` then `npx tauri build --no-bundle` → `src-tauri\target\release\lumen.exe`.
 - Fast compile check: `cargo check` inside `src-tauri` (Rust lives in `%USERPROFILE%\.cargo\bin`).
 - `ui\` is **embedded in the exe at build time**: UI edits need a rebuild (or `run.bat dev`).
@@ -97,7 +101,8 @@ src-tauri/src/
 `server-status`, `metrics`, `download-progress`, `index-progress`, `update-status` (UpdateInfo),
 `update-prompt` (tray asked to update/check; the window confirms), `chat-event`
 (`chat-event.kind`: busy, message, message_update, assistant_start, delta, progress, tool_pending,
-tool_start, assistant_done, assistant_failed, compress_progress, compressed, ctx, title, error).
+tool_start, tool_confirm / tool_confirmed (a process tool waits for the user; answered with `confirm_tool`),
+tool_progress (audit_code batches), assistant_done, assistant_failed, compress_progress, compressed, ctx, title, error).
 
 ## Conventions & gotchas
 - Never hold a `parking_lot` guard across `.await` (guards are !Send; commands get spawned).
@@ -119,5 +124,7 @@ tool_start, assistant_done, assistant_failed, compress_progress, compressed, ctx
 - Idle auto-unload: `settings.idle_unload_min` (metrics.rs `check_idle`). Anything that uses the chat model must
   either register in `state.generations` or call `state.touch()`, or the model can be unloaded under it.
 - All user-facing strings go in `ui/i18n.js` in both `en` and `ro`.
+- Tauri only sets the window's ICON_SMALL; `win::set_window_icons` (called in `setup`) adds ICON_BIG from
+  `icons/icon.ico`, which the taskbar, Alt+Tab and Task Manager use. Keep it if the window is ever recreated.
 - Portable data lives in `LumenData/` next to the exe (falls back to `%LOCALAPPDATA%\Lumen`).
 - Target hardware: AMD RX 9070 XT (16 GB) + 32 GB RAM; default model Qwen3.8-27B UD-IQ4_XS.

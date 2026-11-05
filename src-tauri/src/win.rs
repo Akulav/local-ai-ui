@@ -40,6 +40,47 @@ impl Job {
     }
 }
 
+/// The app icon, embedded so the window can get crisp big and small icons at any DPI.
+const APP_ICO: &[u8] = include_bytes!("../icons/icon.ico");
+
+/// Picks the .ico entry closest to (and preferably not smaller than) `size` pixels.
+fn ico_entry(ico: &[u8], size: u32) -> Option<&[u8]> {
+    let n = u16::from_le_bytes([*ico.get(4)?, *ico.get(5)?]) as usize;
+    let mut best: Option<(u32, &[u8])> = None;
+    for i in 0..n {
+        let e = ico.get(6 + 16 * i..6 + 16 * i + 16)?;
+        let w = if e[0] == 0 { 256 } else { e[0] as u32 };
+        let len = u32::from_le_bytes([e[8], e[9], e[10], e[11]]) as usize;
+        let off = u32::from_le_bytes([e[12], e[13], e[14], e[15]]) as usize;
+        let data = ico.get(off..off + len)?;
+        let better = match best {
+            None => true,
+            Some((bw, _)) => (w >= size && (bw < size || w < bw)) || (bw < size && w > bw),
+        };
+        if better {
+            best = Some((w, data));
+        }
+    }
+    best.map(|(_, d)| d)
+}
+
+/// Sets both window icons. Tauri only sets ICON_SMALL (tao's `set_window_icon`), so the taskbar,
+/// Alt+Tab and Task Manager's app group had no big icon and showed a generic one.
+pub fn set_window_icons(hwnd: isize) {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let h = HWND(hwnd as *mut _);
+    for (kind, metric) in [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)] {
+        let size = unsafe { GetSystemMetrics(metric) }.max(16) as u32;
+        // the taskbar draws the big icon larger than SM_CXICON on high-DPI screens
+        let want = if kind == ICON_BIG { (size * 2).min(256) } else { size };
+        let Some(data) = ico_entry(APP_ICO, want) else { continue };
+        if let Ok(icon) = unsafe { CreateIconFromResourceEx(data, true, 0x0003_0000, want as i32, want as i32, LR_DEFAULTCOLOR) } {
+            unsafe { SendMessageW(h, WM_SETICON, WPARAM(kind as usize), LPARAM(icon.0 as isize)) };
+        }
+    }
+}
+
 /// Resident memory (working set) of a process, in bytes.
 pub fn process_ram(pid: u32) -> u64 {
     unsafe {

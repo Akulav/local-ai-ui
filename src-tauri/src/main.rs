@@ -158,6 +158,11 @@ fn main() {
                 updater::cleanup(&st);
                 st.updates.write().current = handle.package_info().version.to_string();
             }
+            if let Some(w) = handle.get_webview_window("main") {
+                if let Ok(h) = w.hwnd() {
+                    win::set_window_icons(h.0 as isize);
+                }
+            }
             let menu = tray_menu(&handle, &UpdateInfo::default())?;
             TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().cloned().expect("icon"))

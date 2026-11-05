@@ -7,6 +7,19 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+### Added
+- A proper installer: English/Romanian language choice, Lumen icon, branded welcome/finish and header images,
+  publisher "Akulav", Start menu shortcut, optional desktop shortcut and "run Lumen" at the end. Installs per user
+  without administrator rights.
+- `run.bat` now builds the installer next to the portable exe (`dist\Lumen_X.Y.Z_x64-setup.exe`);
+  `run.bat quick` builds only the portable exe.
+
+### Fixed
+- The taskbar, Alt+Tab and Task Manager showed a generic icon for Lumen: the window only had a small icon. It now
+  also gets a big one, picked from the app icon for the screen's DPI.
+- Uninstalling with "Delete the application data" ticked now also removes `LumenData` (models, chats, settings)
+  of an installed copy; before, it stayed behind in `%LOCALAPPDATA%\Lumen`. Updates keep everything.
+
 ## [0.7.1] - 2026-11-05
 
 ### Fixed
