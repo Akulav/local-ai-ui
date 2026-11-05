@@ -7,6 +7,8 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-05
+
 ### Added
 - A proper installer: English/Romanian language choice, Lumen icon, branded welcome/finish and header images,
   publisher "Akulav", Start menu shortcut, optional desktop shortcut and "run Lumen" at the end. Installs per user

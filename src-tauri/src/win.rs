@@ -1,4 +1,4 @@
-﻿//! Windows specifics: a kill-on-close job object (child servers die with the app, even on crash),
+//! Windows specifics: a kill-on-close job object (child servers die with the app, even on crash),
 //! per-process RAM, and per-process VRAM through the "GPU Process Memory" performance counters.
 
 use windows::core::PCWSTR;
@@ -201,6 +201,43 @@ impl Drop for GpuMemCounter {
     fn drop(&mut self) {
         unsafe {
             PdhCloseQuery(self.query);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_the_right_icon_size() {
+        let size = |want: u32| {
+            let d = ico_entry(APP_ICO, want).unwrap();
+            // every entry of icon.ico is a PNG: width is at bytes 16..20 of the IHDR
+            u32::from_be_bytes([d[16], d[17], d[18], d[19]])
+        };
+        assert_eq!(size(16), 16);
+        assert_eq!(size(20), 24);
+        assert_eq!(size(32), 32);
+        assert_eq!(size(40), 48);
+        assert_eq!(size(96), 256);
+        assert_eq!(size(512), 256);
+    }
+
+    /// A real (hidden) window gets both icons, which Tauri alone does not give it.
+    #[test]
+    fn window_gets_big_and_small_icons() {
+        use windows::core::w;
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        unsafe {
+            let h = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("icon test"), WINDOW_STYLE(0), 0, 0, 10, 10, None, None, None, None).unwrap();
+            let get = |kind: u32| SendMessageW(h, WM_GETICON, WPARAM(kind as usize), LPARAM(0)).0;
+            assert_eq!(get(ICON_BIG), 0);
+            set_window_icons(h.0 as isize);
+            assert_ne!(get(ICON_BIG), 0, "big icon (taskbar / Alt+Tab / Task Manager)");
+            assert_ne!(get(ICON_SMALL), 0, "small icon (title bar)");
+            let _ = DestroyWindow(h);
         }
     }
 }
