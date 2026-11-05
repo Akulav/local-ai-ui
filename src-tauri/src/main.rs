@@ -3,6 +3,7 @@
 //! Lumen entry point (made by Akulav): plugins, tray icon, close-to-tray, background start-up
 //! (runtime download + last-model autoload) and guaranteed shutdown of the llama-server children.
 
+mod audit;
 mod calc;
 mod chat;
 mod codetools;

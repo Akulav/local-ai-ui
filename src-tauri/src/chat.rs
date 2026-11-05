@@ -298,11 +298,90 @@ pub fn gen_params(state: &AppState, think: bool) -> Value {
 
 /// Assistant loop: stream a reply; if it requested tools, execute them, store the results and ask
 /// again (max 24 rounds). Compresses mid-loop when long tool sessions approach the window.
+/// Conservative token estimate for context fitting (code tokenises denser than prose).
+fn est_tokens(chars: usize) -> u32 {
+    (chars as f32 / 3.0).ceil() as u32
+}
+
+/// Estimated prompt size of the next request (messages + tool definitions).
+fn prompt_estimate(state: &AppState, chat: &Chat, project: Option<&Project>, web: bool, defs: &[Value]) -> Result<u32> {
+    let msgs = build_messages(state, chat, project, web)?;
+    Ok(est_tokens(serde_json::to_string(&msgs)?.len() + serde_json::to_string(defs)?.len()))
+}
+
+/// Keeps long tool sessions inside the window. Compression only summarises *earlier* turns, so a
+/// single long turn (an audit reading dozens of files) would otherwise grow until llama-server
+/// rejects it. When the prompt passes `high` × budget, the oldest tool results (all but the last
+/// `keep`) are replaced by a one-line stub until it is under `low` × budget. The original stays in
+/// `meta.full` for the UI; the stub is stored, so later prompts stay byte-stable for the cache.
+fn fit_context(state: &AppState, chat_id: &str, project: Option<&Project>, web: bool, defs: &[Value], (high, low, keep): (f32, f32, usize)) -> Result<u32> {
+    let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?;
+    let b = budget(state, &chat) as f32;
+    let mut est =prompt_estimate(state, &chat, project, web, defs)?;
+    if (est as f32) <= b * high {
+        return Ok(est);
+    }
+    let msgs = state.db.messages(chat_id)?;
+    let tools_live: Vec<&Message> = msgs.iter().filter(|m| !m.compressed && m.role == "tool").collect();
+    // oldest first, sparing the last `keep` results; if that is not enough (a few huge reads in a
+    // small window), continue into them too, always sparing the newest one
+    let n_tools = tools_live.len();
+    let order = (0..n_tools.saturating_sub(keep)).chain(n_tools.saturating_sub(keep)..n_tools.saturating_sub(1));
+    let mut pruned = 0;
+    for m in order.map(|i| tools_live[i]) {
+        if (est as f32) <= b * low {
+            break;
+        }
+        if m.meta["pruned"].as_bool().unwrap_or(false) || m.content.len() < 400 {
+            continue;
+        }
+        let name = m.meta["name"].as_str().unwrap_or("tool");
+        let args: Value = serde_json::from_str(m.meta["arguments"].as_str().unwrap_or("{}")).unwrap_or_default();
+        let what = ["path", "pattern", "name", "query", "command", "url"].iter().find_map(|k| args[*k].as_str()).unwrap_or("");
+        let stub = format!("[{name}({what}) output removed to save context ({} chars). You already used it above; call the tool again if you need it.]", m.content.len());
+        let mut meta = m.meta.clone();
+        meta["pruned"] = json!(true);
+        meta["full"] = json!(m.content);
+        state.db.update_message(&m.id, &stub, &m.reasoning, &meta)?;
+        est = est.saturating_sub(est_tokens(m.content.len())) + est_tokens(stub.len());
+        pruned += 1;
+    }
+    if pruned > 0 {
+        state.log(format!("context: pruned {pruned} old tool results, ~{est} tokens of {b}"));
+        let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?;
+        est = prompt_estimate(state, &chat, project, web, defs)?;
+    }
+    Ok(est)
+}
+
+/// Cuts a tool result down to `max_tokens`, keeping the start and the end, and tells the model how
+/// to get the rest instead of overflowing the window.
+fn clip_tool_output(content: &str, max_tokens: u32) -> String {
+    let max_chars = (max_tokens as usize) * 3;
+    if content.len() <= max_chars {
+        return content.to_string();
+    }
+    let head = content.floor_char_boundary(max_chars * 4 / 5);
+    let tail = content.ceil_char_boundary(content.len() - max_chars / 5);
+    format!(
+        "{}\n\n[… {} characters cut to fit the context window. Ask for less at once: a line range with read_file, a narrower path/glob, or audit_code for large reviews …]\n\n{}",
+        &content[..head],
+        tail - head,
+        &content[tail..]
+    )
+}
+
+fn is_context_overflow(e: &anyhow::Error) -> bool {
+    let s = e.to_string().to_lowercase();
+    s.contains("context") && (s.contains("exceed") || s.contains("too long") || s.contains("size") || s.contains("n_ctx"))
+}
+
 async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, think: bool, web: bool, cancel: &AtomicBool) -> Result<()> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let defs = tools::definitions(project.is_some(), web);
     let ctx = ToolCtx { app, project, chat_id, cancel };
-    for _ in 0..24 {
+    for _ in 0..40 {
+        let _ = fit_context(&state, chat_id, project, web, &defs, (0.72, 0.5, 4))?;
         let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?;
         let messages = build_messages(&state, &chat, project, web)?;
         let mut body = gen_params(&state, think);
@@ -310,18 +389,46 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
         if !defs.is_empty() {
             body["tools"] = json!(defs);
         }
-        let (_msg, r) = stream_assistant(app, chat_id, body, cancel, json!({})).await?;
+        let (_msg, r) = match stream_assistant(app, chat_id, body.clone(), cancel, json!({})).await {
+            Ok(x) => x,
+            Err(e) if is_context_overflow(&e) => {
+                // the estimate was off: drop everything but the latest tool result and try once more
+                fit_context(&state, chat_id, project, web, &defs, (0.0, 0.3, 1))?;
+                let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?;
+                body["messages"] = json!(build_messages(&state, &chat, project, web)?);
+                stream_assistant(app, chat_id, body, cancel, json!({})).await.map_err(|e| {
+                    if is_context_overflow(&e) {
+                        anyhow!("This turn no longer fits in the model's context window. Start a new chat, raise the context size in Settings, or ask for a smaller part (a folder) to be reviewed with audit_code.")
+                    } else {
+                        e
+                    }
+                })?
+            }
+            Err(e) => return Err(e),
+        };
         if r.cancelled || r.tool_calls.is_empty() {
             break;
         }
-        for tc in &r.tool_calls {
+        // room left for this round's results, shared between the calls
+        let b = budget(&state, &state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?);
+        let mut used = (r.prompt_tokens + r.completion_tokens).max(1);
+        let n_calls = r.tool_calls.len() as u32;
+        for (i, tc) in r.tool_calls.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             emit(app, chat_id, "tool_start", json!({"id": tc.id, "name": tc.name, "arguments": tc.arguments}));
             let out = tools::run(&ctx, &tc.id, &tc.name, &tc.arguments).await;
-            let meta = json!({"tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments, "display": out.display, "ok": out.ok});
-            let m = state.db.add_message(chat_id, "tool", &out.content, "", &meta)?;
+            let free = (b as f32 * 0.8) as u32;
+            let share = free.saturating_sub(used) / (n_calls - i as u32).max(1);
+            let content = clip_tool_output(&out.content, share.clamp(1500, 16_000));
+            used += est_tokens(content.len());
+            let mut meta = json!({"tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments, "display": out.display, "ok": out.ok});
+            if content.len() < out.content.len() {
+                meta["full"] = json!(out.content);
+                meta["clipped"] = json!(true);
+            }
+            let m = state.db.add_message(chat_id, "tool", &content, "", &meta)?;
             emit(app, chat_id, "message", json!({"message": m}));
         }
         // compress mid-loop if long tool sessions approach the limit
@@ -522,4 +629,55 @@ pub async fn compress_now(app: AppHandle, chat_id: String) -> Result<()> {
     state.generations.lock().remove(&chat_id);
     emit(&app, &chat_id, "busy", json!({"busy": false}));
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipping_keeps_start_and_end() {
+        let s: String = (0..5000).map(|i| format!("line {i}\n")).collect();
+        let c = clip_tool_output(&s, 1500);
+        assert!(c.len() < 5200 && c.starts_with("line 0\n") && c.trim_end().ends_with("line 4999"));
+        assert!(c.contains("cut to fit the context window"));
+        assert_eq!(clip_tool_output("short", 1500), "short");
+    }
+
+    #[test]
+    fn overflow_errors_are_recognised() {
+        assert!(is_context_overflow(&anyhow!("llama-server 400 Bad Request: the request exceeds the available context size, try increasing it")));
+        assert!(!is_context_overflow(&anyhow!("connection refused")));
+    }
+
+    /// A single-turn audit that read many files: old tool results get stubbed until the prompt fits.
+    #[test]
+    fn long_turn_is_pruned_to_fit() {
+        let state = AppState::new().unwrap();
+        state.info.write().n_ctx = 8192;
+        let chat = state.db.create_chat(None, "New chat").unwrap();
+        state.db.add_message(&chat.id, "user", "Audit the whole project", "", &json!({})).unwrap();
+        let big: String = "fn x() { let y = 1; }\n".repeat(400); // ~8.8k chars each
+        for i in 0..8 {
+            let id = format!("call{i}");
+            state.db.add_message(&chat.id, "assistant", "", "", &json!({"tool_calls": [{"id": id, "name": "read_file", "arguments": format!("{{\"path\":\"f{i}.rs\"}}")}]})).unwrap();
+            state.db.add_message(&chat.id, "tool", &big, "", &json!({"tool_call_id": id, "name": "read_file", "arguments": format!("{{\"path\":\"f{i}.rs\"}}")})).unwrap();
+        }
+        let c = state.db.chat(&chat.id).unwrap().unwrap();
+        let before = prompt_estimate(&state, &c, None, false, &[]).unwrap();
+        assert!(before as f32 > 8192.0 * 0.72, "test setup must overflow: {before}");
+        let after = fit_context(&state, &chat.id, None, false, &[], (0.72, 0.5, 4)).unwrap();
+        println!("estimate {before} -> {after} tokens (window 8192)");
+        assert!(after as f32 <= 8192.0 * 0.6);
+        let msgs = state.db.messages(&chat.id).unwrap();
+        let tools: Vec<&Message> = msgs.iter().filter(|m| m.role == "tool").collect();
+        assert!(tools[0].meta["pruned"].as_bool().unwrap_or(false));
+        assert_eq!(tools[0].meta["full"].as_str().unwrap(), big);
+        assert!(tools[0].content.contains("read_file(f0.rs) output removed"));
+        assert!(!tools.last().unwrap().meta["pruned"].as_bool().unwrap_or(false), "the latest results stay");
+        // already fitting: nothing more changes, so the prompt stays byte-stable
+        let again = fit_context(&state, &chat.id, None, false, &[], (0.72, 0.5, 4)).unwrap();
+        assert_eq!(again, after);
+        state.db.delete_chat(&chat.id).unwrap();
+    }
 }

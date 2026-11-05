@@ -22,7 +22,7 @@ const MAX_FILE_BYTES: u64 = 2_000_000;
 
 /// Walks the text files under `base` (gitignore-aware, skips hidden + build folders), optionally
 /// filtered by a glob such as `*.rs` or `src/**/*.ts`.
-fn walk_files(base: &Path, glob: Option<&str>) -> Result<Vec<PathBuf>> {
+pub fn walk_files(base: &Path, glob: Option<&str>) -> Result<Vec<PathBuf>> {
     if base.is_file() {
         return Ok(vec![base.to_path_buf()]);
     }
@@ -48,7 +48,7 @@ fn walk_files(base: &Path, glob: Option<&str>) -> Result<Vec<PathBuf>> {
 }
 
 /// Reads a file as text; None for binary files (NUL byte in the first 8 KB).
-fn read_text(p: &Path) -> Option<String> {
+pub fn read_text(p: &Path) -> Option<String> {
     let bytes = std::fs::read(p).ok()?;
     if bytes.iter().take(8192).any(|b| *b == 0) {
         return None;
@@ -56,11 +56,11 @@ fn read_text(p: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn rel_of(root: &Path, p: &Path) -> String {
+pub fn rel_of(root: &Path, p: &Path) -> String {
     p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
 }
 
-fn canonical_root(folder: &str) -> Result<PathBuf> {
+pub fn canonical_root(folder: &str) -> Result<PathBuf> {
     let (root, _) = resolve(Path::new(folder), "")?;
     Ok(root)
 }
@@ -308,7 +308,7 @@ pub fn findings(folder: Option<&str>, a: &Value) -> Result<(String, Value)> {
     let summary = a["summary"].as_str().unwrap_or("").trim().to_string();
     let mut items = Vec::new();
     let mut problems = Vec::new();
-    for (i, f) in list.iter().enumerate().take(100) {
+    for (i, f) in list.iter().enumerate().take(400) {
         let title = f["title"].as_str().or(f["issue"].as_str()).unwrap_or("").trim().to_string();
         if title.is_empty() {
             problems.push(format!("#{}: missing title", i + 1));

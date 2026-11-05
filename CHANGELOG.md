@@ -7,6 +7,25 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-05
+
+### Added
+- `audit_code`: audits a whole project or folder of any size. The source files are reviewed in batches that fit
+  the model's window, each in a fresh context, and all findings land in one review card (with how many files and
+  batches were covered). The tool card shows live progress, and Stop works between batches. Lockfiles, minified,
+  vendored and generated files are skipped.
+
+### Fixed
+- Long tool sessions in a single message (for example "audit this project") no longer run out of context and fail.
+  Compression only summarised earlier messages, so one long turn kept growing until llama-server rejected it. Now:
+  - each tool result is cut to fit the room left in the window (start and end kept, with a hint to ask for less);
+  - when the prompt gets near the limit, the oldest tool results are replaced by a one-line note (still shown in
+    full in the chat), so the model keeps working;
+  - if llama-server still reports a context overflow, Lumen prunes harder and retries once, then explains what to do
+    instead of failing with a raw error.
+- The system prompt tells the model that its context is limited: use `audit_code` for big reviews, read files in
+  ranges, and prefer `grep`/`find_symbol` over reading everything.
+
 ## [0.6.1] - 2026-11-05
 
 ### Fixed

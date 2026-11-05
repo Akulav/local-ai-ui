@@ -644,12 +644,12 @@ function assistantEl(m) {
 const TOOL_LABEL = {
   search_project: "toolSearch", list_files: "toolList", read_file: "toolRead", write_file: "toolWrite", edit_file: "toolEdit", web_search: "toolWeb", fetch_url: "toolFetch",
   grep: "toolGrep", file_outline: "toolOutline", find_symbol: "toolSymbol", compare_files: "toolCompare", git_status: "toolGitStatus", git_diff: "toolGitDiff",
-  run_command: "toolRun", report_findings: "toolFindings", calculate: "toolCalc", current_datetime: "toolTime",
+  run_command: "toolRun", report_findings: "toolFindings", audit_code: "toolAudit", calculate: "toolCalc", current_datetime: "toolTime",
 };
 const TOOL_ICON = {
   search_project: "search", list_files: "list", read_file: "file", write_file: "edit", edit_file: "edit", web_search: "globe", fetch_url: "link",
   grep: "search", file_outline: "code", find_symbol: "code", compare_files: "diff", git_status: "git", git_diff: "git",
-  run_command: "terminal", report_findings: "shield", calculate: "calc", current_datetime: "clock",
+  run_command: "terminal", report_findings: "shield", audit_code: "shield", calculate: "calc", current_datetime: "clock",
 };
 function toolArgSummary(name, argsRaw) {
   let a = {};
@@ -666,6 +666,11 @@ function findingsEl(d, m) {
   const counts = SEV_ORDER.filter((s) => d.counts?.[s]).map((s) => `<span class="sev sev-${s}">${d.counts[s]} ${esc(t("sev_" + s))}</span>`).join("");
   const n = el(`<div class="review" data-call="${esc(m.meta?.tool_call_id || "")}"><div class="review-h">${icon("shield")}<span class="name">${esc(t("reviewTitle"))}</span><span class="counts">${counts || `<span class="sev sev-info">${esc(t("reviewClean"))}</span>`}</span><span class="spacer"></span><button data-a="copy" title="${esc(t("copy"))}">${icon("copy")}</button></div>${d.summary ? `<div class="review-sum"></div>` : ""}<div class="review-list"></div></div>`);
   if (d.summary) n.querySelector(".review-sum").textContent = d.summary;
+  if (d.audit) {
+    const a = d.audit;
+    const info = [t(a.stopped ? "auditStopped" : "auditInfo", { f: a.files, b: a.batches }), a.failed ? t("auditFailed", { n: a.failed }) : "", a.skipped ? t("auditSkipped", { n: a.skipped }) : ""].filter(Boolean).join(" · ");
+    n.querySelector(".review-h").insertAdjacentElement("afterend", el(`<div class="review-sum">${esc(info)}</div>`));
+  }
   const box = n.querySelector(".review-list");
   for (const f of list) {
     const loc = f.path ? `${f.path}${f.line ? ":" + f.line : ""}` : "";
@@ -731,7 +736,9 @@ function toolEl(m) {
   if (d.kind === "findings") return findingsEl(d, m);
   if (d.kind === "gitdiff") return gitDiffEl(d, m);
   const n = el(`<div class="tool" data-call="${esc(m.meta?.tool_call_id || "")}"><div class="tool-h">${icon(TOOL_ICON[name] || "bolt")}<span class="name">${esc(t(TOOL_LABEL[name] || name))}</span><span class="arg">${esc(toolArgSummary(name, m.meta?.arguments))}${d.lines ? " · " + esc(d.lines) : ""}</span><span class="st">${m.meta?.ok ? icon("check", "ok-ic") : icon("x", "bad-ic")}${icon("chevron")}</span></div><div class="tool-b"></div></div>`);
-  n.querySelector(".tool-b").textContent = m.content.length > 20000 ? m.content.slice(0, 20000) + "\n…" : m.content;
+  const full = m.meta?.full || m.content; // pruned / clipped results keep the original for the UI
+  n.querySelector(".tool-b").textContent = full.length > 20000 ? full.slice(0, 20000) + "\n…" : full;
+  if (m.meta?.pruned || m.meta?.clipped) n.querySelector(".tool-h .arg").insertAdjacentHTML("afterend", `<span class="res" title="${esc(t(m.meta.pruned ? "prunedHint" : "clippedHint"))}">${icon("compress")}</span>`);
   if (d.kind === "search" && d.hits?.length) {
     const h = el(`<div class="hits"></div>`);
     h.innerHTML = d.hits.map((x) => `<span class="chip">${icon("file")}${esc(x.path)}:${esc(x.lines)}</span>`).join("");
@@ -1434,6 +1441,16 @@ listen("chat-event", (e) => {
     case "assistant_failed": if (S.live) { S.live.seg.remove(); S.live = null; } break;
     case "tool_start": currentTurn(true).querySelector(".turn-body").appendChild(runningToolEl(p.id, p.name, p.arguments)); scrollBottom(); break;
     case "tool_confirm": S.confirms[p.id] = p; showConfirm(p); break;
+    case "tool_progress": { // audit_code batches
+      const n = $(`#thread .tool[data-call="${p.call_id}"]`); if (!n) break;
+      let r = n.querySelector(".tool-h .res");
+      if (!r) { r = el(`<span class="res"></span>`); n.querySelector(".tool-h .st").before(r); }
+      r.textContent = p.total ? `${Math.min(p.done + 1, p.total)}/${p.total} · ${p.text}` : p.text;
+      let bar = n.querySelector(".tool-prog");
+      if (!bar) { bar = el(`<div class="prog tool-prog"><div></div></div>`); n.appendChild(bar); }
+      bar.firstElementChild.style.width = (p.total ? Math.round((p.done / p.total) * 100) : 2) + "%";
+      break;
+    }
     case "tool_confirmed": {
       delete S.confirms[p.id];
       const n = $(`#thread [data-confirm="${p.id}"]`);

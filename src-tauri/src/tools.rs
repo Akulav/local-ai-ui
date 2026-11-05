@@ -154,6 +154,17 @@ pub fn definitions(project: bool, web: bool) -> Vec<Value> {
             }}),
         ));
         v.push(func(
+            "audit_code",
+            "Audit a whole project or folder for bugs and security issues, however large: the files are reviewed in batches, each in a fresh context, and all findings appear to the user as one review card. Use it for full-codebase or folder-wide audits instead of reading every file yourself (that would overflow your context). It can take several minutes on big projects.",
+            json!({"type": "object", "properties": {
+                "path": {"type": "string", "description": "Folder or file to audit, default the whole project"},
+                "glob": {"type": "string", "description": "File filter such as *.rs or src/**/*.ts"},
+                "focus": {"type": "string", "description": "Optional emphasis, e.g. security, error handling, concurrency"},
+                "language": {"type": "string", "enum": ["en", "ro"], "description": "Language of the user's messages; findings are written in it"},
+                "max_files": {"type": "integer", "description": "Default 400"}
+            }}),
+        ));
+        v.push(func(
             "run_command",
             "Run one of the project's own check commands in the project folder (tests, linter, type-checker, build), e.g. `cargo test`, `npm test`, `pytest -q`, `ruff check .`, `tsc --noEmit`. Runs through cmd.exe on Windows. The user sees the exact command and must allow it; never use it to modify, delete, install or download anything.",
             json!({"type": "object", "properties": {
@@ -360,6 +371,11 @@ async fn run_inner(ctx: &ToolCtx<'_>, call_id: &str, name: &str, a: &Value) -> R
             let p = need_project()?;
             let (folder, x, y) = (p.folder.clone(), s(a, "path_a")?.to_string(), s(a, "path_b")?.to_string());
             blocking(move || codetools::compare(&folder, &x, &y)).await.map(out)
+        }
+        "audit_code" => {
+            let p = need_project()?;
+            let c = crate::audit::AuditCtx { app: ctx.app, chat_id: ctx.chat_id, call_id, folder: &p.folder, cancel: ctx.cancel };
+            crate::audit::run(&c, a).await.map(out)
         }
         "git_status" | "git_diff" | "run_command" => {
             let p = need_project()?;

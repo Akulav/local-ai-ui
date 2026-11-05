@@ -201,6 +201,7 @@ a.chip:hover { border-color: var(--accent); color: var(--text); }
 .tool-h .res { color: var(--text-2); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
 .tool-h .res.bad { color: var(--bad); }
 .tool.cmd .tool-b { max-height: 420px; }
+.tool .tool-prog { height: 4px; margin: 0 12px 10px; }
 .tool .gst { color: var(--warn); font-family: var(--mono); margin-right: 2px; }
 .muted-note { color: var(--text-3); font-size: 12px; padding: 6px 12px; }
 .gitdiff .gd-body { display: none; flex-direction: column; gap: 8px; padding: 0 10px 10px; }
