@@ -7,6 +7,13 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-05
+
+### Fixed
+- "request exceeds the available context size" in long conversations: when llama-server rejects a prompt, Lumen now
+  also summarises the earlier turns (not only old tool results) before it retries, and it compresses a little
+  earlier before sending (at 80 % of the window instead of 90 %), leaving room for the estimate's error and the reply.
+
 ## [0.7.0] - 2026-11-05
 
 ### Added

@@ -165,7 +165,8 @@ pub async fn send(app: AppHandle, opts: SendOpts) -> Result<()> {
         // compress first if the new message would not fit comfortably
         let fresh = state.db.chat(&chat.id)?.unwrap_or(chat.clone());
         let incoming = llm::estimate_tokens(meta["prompt_content"].as_str().unwrap_or(&opts.text));
-        if fresh.ctx_used + incoming > (budget(&state, &fresh) as f32 * 0.9) as u32 {
+        // 0.8, not 0.9: the estimate can be ~10% low, and the reply needs room too
+        if fresh.ctx_used + incoming > (budget(&state, &fresh) as f32 * 0.8) as u32 {
             let _ = compress(&app, &chat.id, &cancel).await;
         }
         let user = state.db.add_message(&chat.id, "user", &opts.text, "", &meta)?;
@@ -392,8 +393,11 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
         let (_msg, r) = match stream_assistant(app, chat_id, body.clone(), cancel, json!({})).await {
             Ok(x) => x,
             Err(e) if is_context_overflow(&e) => {
-                // the estimate was off: drop everything but the latest tool result and try once more
+                // the estimate was off: drop everything but the latest tool result, summarise the earlier
+                // turns too (long conversations overflow without any tool output), and try once more
+                state.log(format!("context overflow, shrinking the prompt and retrying: {e}"));
                 fit_context(&state, chat_id, project, web, &defs, (0.0, 0.3, 1))?;
+                compress(app, chat_id, cancel).await?;
                 let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?;
                 body["messages"] = json!(build_messages(&state, &chat, project, web)?);
                 stream_assistant(app, chat_id, body, cancel, json!({})).await.map_err(|e| {
@@ -647,6 +651,8 @@ mod tests {
     #[test]
     fn overflow_errors_are_recognised() {
         assert!(is_context_overflow(&anyhow!("llama-server 400 Bad Request: the request exceeds the available context size, try increasing it")));
+        // the exact message reported from the field
+        assert!(is_context_overflow(&anyhow!("llama-server 400 Bad Request: request (40678 tokens) exceeds the available context size (39680 tokens), try increasing it")));
         assert!(!is_context_overflow(&anyhow!("connection refused")));
     }
 
