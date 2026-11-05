@@ -119,11 +119,12 @@ pub struct AuditCtx<'a> {
 pub async fn run(c: &AuditCtx<'_>, a: &Value) -> Result<(String, Value)> {
     let state = c.app.state::<Arc<AppState>>().inner().clone();
     let report = |done: usize, total: usize, text: &str| progress(c.app, c.chat_id, c.call_id, done, total, text);
-    review(&state, c.folder, a, c.cancel, &report).await
+    review(&state, Some(c.app), c.folder, a, c.cancel, &report).await
 }
 
 /// The pipeline itself, independent of the window (progress goes to `report`).
-pub async fn review(state: &AppState, folder: &str, a: &Value, cancel: &AtomicBool, report: &(dyn Fn(usize, usize, &str) + Sync)) -> Result<(String, Value)> {
+/// `app` lets a batch restart llama-server and retry once when the connection drops (None in tests).
+pub async fn review(state: &AppState, app: Option<&AppHandle>, folder: &str, a: &Value, cancel: &AtomicBool, report: &(dyn Fn(usize, usize, &str) + Sync)) -> Result<(String, Value)> {
     let sub = a["path"].as_str().unwrap_or("").to_string();
     let glob = a["glob"].as_str().map(String::from);
     let focus = a["focus"].as_str().unwrap_or("").to_string();
@@ -196,6 +197,7 @@ pub async fn review(state: &AppState, folder: &str, a: &Value, cancel: &AtomicBo
     let mut all: Vec<Value> = Vec::new();
     let mut failed = 0;
     let mut done = 0;
+    let mut server_lost: Option<String> = None;
     for (bi, batch) in batches.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             break;
@@ -215,7 +217,27 @@ pub async fn review(state: &AppState, folder: &str, a: &Value, cancel: &AtomicBo
             "chat_template_kwargs": {"enable_thinking": false},
             "response_format": {"type": "json_schema", "json_schema": {"name": "findings", "schema": schema()}},
         });
-        match llm::stream_chat(state, body, cancel, |_| {}).await {
+        let mut res = llm::stream_chat(state, body.clone(), cancel, |_| {}).await;
+        if let (Err(e), Some(app)) = (&res, app) {
+            if llm::is_connection_error(e) && !cancel.load(Ordering::Relaxed) {
+                state.log(format!("audit batch {}/{n}: lost the connection to llama-server ({e}); restarting it", bi + 1));
+                report(bi, n, "restarting the model server");
+                match crate::server::recover(app).await {
+                    Ok(_) => res = llm::stream_chat(state, body, cancel, |_| {}).await,
+                    Err(re) => {
+                        server_lost = Some(re.to_string());
+                        break;
+                    }
+                }
+                if res.as_ref().err().is_some_and(llm::is_connection_error) {
+                    // it died again on this batch: stop here and keep what was found so far
+                    server_lost = Some(res.as_ref().err().map(|e| e.to_string()).unwrap_or_default());
+                    failed += 1;
+                    break;
+                }
+            }
+        }
+        match res {
             Ok(r) if r.cancelled => break,
             Ok(r) => match serde_json::from_str::<Value>(r.content.trim()) {
                 Ok(v) => {
@@ -242,13 +264,13 @@ pub async fn review(state: &AppState, folder: &str, a: &Value, cancel: &AtomicBo
     let folder = folder.to_string();
     let args = json!({"summary": "", "findings": all});
     let (_, mut disp) = tokio::task::spawn_blocking(move || crate::codetools::findings(Some(&folder), &args)).await??;
-    disp["audit"] = json!({"files": files, "batches": n, "reviewed": done, "failed": failed, "skipped": skipped.len(), "stopped": stopped});
+    disp["audit"] = json!({"files": files, "batches": n, "reviewed": done, "failed": failed, "skipped": skipped.len(), "stopped": stopped || server_lost.is_some()});
 
     // 5. compact text for the chat model
     let items = disp["findings"].as_array().cloned().unwrap_or_default();
     let mut out = format!(
         "Audit {}: {files} files in {n} batches ({done} reviewed{}). {} findings. The user sees all of them in the review card: do NOT call report_findings for these.\n",
-        if stopped { "stopped by the user" } else { "finished" },
+        if stopped { "stopped by the user".to_string() } else if let Some(e) = &server_lost { format!("stopped early because the model server crashed twice ({e}); the findings below cover the batches done before that") } else { "finished".to_string() },
         if failed > 0 { format!(", {failed} failed") } else { String::new() },
         items.len()
     );
@@ -345,7 +367,7 @@ mod tests {
             let cancel = AtomicBool::new(false);
             let seen = std::sync::Mutex::new(Vec::new());
             let report = |d: usize, t: usize, s: &str| seen.lock().unwrap().push(format!("{d}/{t} {s}"));
-            let (text, disp) = review(&state, &repo, &json!({"path": "src-tauri/src"}), &cancel, &report).await.unwrap();
+            let (text, disp) = review(&state, None, &repo, &json!({"path": "src-tauri/src"}), &cancel, &report).await.unwrap();
             println!("--- progress\n{}", seen.lock().unwrap().join("\n"));
             println!("--- to the model\n{text}");
             println!("--- card: {}", disp["audit"]);

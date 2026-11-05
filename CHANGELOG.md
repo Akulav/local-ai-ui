@@ -7,6 +7,19 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-05
+
+### Fixed
+- When llama-server crashed or dropped the connection mid-reply (seen at the end of a long code audit), the turn
+  failed with a connection error, and Lumen kept showing the model as ready, so every later message failed too.
+  Now:
+  - a lost connection restarts the model server and retries the reply once (a toast says so);
+  - `audit_code` does the same per batch, and if the server dies again it stops early and keeps the findings so far;
+  - a server that exits on its own is noticed within a second: the status bar says it stopped (with the exit code,
+    e.g. access violation or failed assertion), and the next message reloads the model.
+- The server log is now also written to `LumenData\logs\lumen.log` (rotated at 8 MB), so the reason for a crash
+  survives closing the app.
+
 ## [0.8.0] - 2026-11-05
 
 ### Added

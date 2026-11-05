@@ -230,7 +230,76 @@ pub async fn complete(state: &AppState, messages: Value, max_tokens: u32, schema
     Ok(r.content.trim().to_string())
 }
 
+/// True when the request failed because the connection to llama-server broke (refused, reset, closed
+/// mid-stream), as opposed to an HTTP error the server answered with.
+pub fn is_connection_error(e: &anyhow::Error) -> bool {
+    if let Some(r) = e.chain().find_map(|c| c.downcast_ref::<reqwest::Error>()) {
+        return r.is_connect() || r.is_request() || r.is_body() || r.is_decode() || r.is_timeout();
+    }
+    let s = e.to_string().to_lowercase();
+    ["connection closed", "connection reset", "connection refused", "error sending request", "broken pipe", "no model is loaded"].iter().any(|k| s.contains(k))
+}
+
 /// Rough token estimate when the server hasn't told us yet (~3.6 chars/token across EN/RO/code).
 pub fn estimate_tokens(s: &str) -> u32 {
     (s.chars().count() as f32 / 3.6).ceil() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A stand-in llama-server that starts streaming, then drops the connection: what Lumen sees when
+    /// llama-server crashes mid-reply. The error must be classed as a lost connection (so the turn
+    /// restarts the server and retries), and nothing from the log may be lost.
+    #[test]
+    fn dropped_stream_is_a_connection_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = l.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut s, _) = l.accept().await.unwrap();
+                let mut buf = [0u8; 65536];
+                let _ = s.read(&mut buf).await;
+                let chunk = json!({"choices": [{"delta": {"content": "Here is the overview of the au"}}]});
+                // chunked transfer: one chunk, then the socket closes without the terminating chunk
+                let body = format!("data: {chunk}\n\n");
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+                let _ = s.write_all(format!("{head}{:x}\r\n{body}\r\n", body.len()).as_bytes()).await;
+                let _ = s.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                drop(s);
+            });
+            let state = AppState::new().unwrap();
+            {
+                let mut i = state.info.write();
+                i.state = "ready".into();
+                i.port = port;
+            }
+            let cancel = AtomicBool::new(false);
+            let mut got = String::new();
+            let r = stream_chat(&state, json!({"messages": []}), &cancel, |d| {
+                if let Delta::Content(c) = d {
+                    got.push_str(c)
+                }
+            })
+            .await;
+            let e = r.expect_err("a dropped stream must be an error, not a truncated success");
+            println!("error: {e:#}  (content before the drop: {got:?})");
+            assert!(is_connection_error(&e), "{e:#}");
+
+            // nothing listening at all (server gone): also a connection error
+            state.info.write().port = 1;
+            let e = stream_chat(&state, json!({"messages": []}), &cancel, |_| {}).await.unwrap_err();
+            assert!(is_connection_error(&e), "{e:#}");
+            // after the crash is recorded the status is not ready: also triggers recovery
+            state.info.write().state = "stopped".into();
+            let e = stream_chat(&state, json!({"messages": []}), &cancel, |_| {}).await.unwrap_err();
+            assert!(is_connection_error(&e), "{e:#}");
+            // an HTTP error the server answered with (context overflow) is not
+            assert!(!is_connection_error(&anyhow!("llama-server 400 Bad Request: request (40678 tokens) exceeds the available context size (39680 tokens)")));
+        });
+    }
 }

@@ -125,7 +125,96 @@ pub async fn stop_llm(app: &AppHandle) {
         i.message.clear();
         i.idle_unloaded_min = 0;
         i.loaded_at = 0;
+        i.crash.clear();
     });
+}
+
+/// Describes a llama-server exit status, naming the common Windows crash codes.
+fn describe_exit(status: &std::process::ExitStatus) -> String {
+    let Some(code) = status.code() else { return status.to_string() };
+    let hint = match code as u32 {
+        0xC000_0005 => " (access violation)",
+        0xC000_0409 => " (abort / failed assertion)",
+        0xC000_00FD => " (stack overflow)",
+        0xC000_0017 | 0xC000_012D => " (out of memory)",
+        0xC000_001D => " (illegal instruction: CPU feature missing)",
+        3 => " (abort / failed assertion)",
+        _ => "",
+    };
+    if !(0..=0xFFFF).contains(&code) { format!("exit code 0x{:08x}{hint}", code as u32) } else { format!("exit code {code}{hint}") }
+}
+
+/// Marks the chat server as gone after it died on its own: status `stopped` with `crash` set, so the
+/// UI says what happened and the next message reloads the model (the UI does that for `stopped`).
+fn record_crash(app: &AppHandle, what: &str) {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    state.log(format!("[lumen] llama-server stopped unexpectedly: {what}. The lines above are its last output."));
+    set_status(app, |i| {
+        i.state = "stopped".into();
+        i.crash = what.to_string();
+        i.message = format!("llama-server stopped unexpectedly ({what})");
+        i.n_ctx = 0;
+        i.pid = 0;
+        i.port = 0;
+        i.loaded_at = 0;
+    });
+}
+
+/// Called every second by the metrics sampler: notices a chat llama-server that exited by itself
+/// (crash, driver reset, killed from outside). Before this, Lumen kept showing "ready" and every
+/// request failed with a connection error until the model was reloaded by hand.
+pub fn check_alive(app: &AppHandle) {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    if state.info.read().state != "ready" {
+        return;
+    }
+    let Ok(mut guard) = state.llm.try_lock() else { return };
+    let exited = match guard.as_mut() {
+        Some(p) => p.child.try_wait().ok().flatten(),
+        None => return,
+    };
+    if let Some(status) = exited {
+        guard.take();
+        drop(guard);
+        record_crash(app, &describe_exit(&status));
+    }
+}
+
+static RECOVERING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// After a connection error mid-request: if llama-server died (or stopped answering), restart the
+/// last model so the caller can retry. Returns Ok(true) when it restarted, Ok(false) when the server
+/// is fine (a transient error: just retry).
+pub async fn recover(app: &AppHandle) -> Result<bool> {
+    let _one = RECOVERING.lock().await; // two chats failing at once restart it only once
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let model = state.info.read().model.clone().or_else(|| state.settings.read().last_model.clone()).ok_or_else(|| anyhow!("no model to restart"))?;
+    let (alive, port) = {
+        let mut g = state.llm.lock().await;
+        match g.as_mut() {
+            Some(p) => match p.child.try_wait() {
+                Ok(Some(status)) => {
+                    g.take();
+                    drop(g);
+                    record_crash(app, &describe_exit(&status));
+                    (false, 0)
+                }
+                _ => (true, p.port),
+            },
+            None => (false, 0),
+        }
+    };
+    if alive {
+        let healthy = state.http.get(format!("http://127.0.0.1:{port}/health")).timeout(Duration::from_secs(5)).send().await.map(|r| r.status().is_success()).unwrap_or(false);
+        if healthy {
+            state.log("[lumen] connection to llama-server dropped but it is still healthy; retrying");
+            return Ok(false);
+        }
+        state.log("[lumen] llama-server is not answering; restarting it");
+    }
+    state.log(format!("[lumen] restarting llama-server with {model}"));
+    start_llm(app, &model).await?;
+    Ok(true)
 }
 
 /// Frees VRAM after `minutes` without use (called by the metrics sampler). The status keeps the
@@ -250,6 +339,7 @@ pub async fn start_llm(app: &AppHandle, model_file: &str) -> Result<()> {
         i.port = port;
         i.n_ctx = n_ctx;
         i.message = String::new();
+        i.crash.clear();
         i.loaded_at = crate::state::now_ms();
     });
     state.log(format!("[lumen] model ready on port {port}, n_ctx={n_ctx}"));
@@ -347,5 +437,20 @@ pub async fn stop_all(app: &AppHandle) {
     let emb = state.embed.lock().await.take();
     if let Some(p) = emb {
         p.kill().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real processes exiting the way a crashed llama-server does.
+    #[test]
+    fn exit_codes_are_named() {
+        let run = |code: &str| std::process::Command::new("cmd").args(["/C", &format!("exit {code}")]).status().unwrap();
+        assert_eq!(describe_exit(&run("0")), "exit code 0");
+        assert_eq!(describe_exit(&run("3")), "exit code 3 (abort / failed assertion)");
+        assert_eq!(describe_exit(&run("-1073741819")), "exit code 0xc0000005 (access violation)");
+        assert_eq!(describe_exit(&run("-1073740791")), "exit code 0xc0000409 (abort / failed assertion)");
     }
 }

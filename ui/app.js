@@ -1289,7 +1289,7 @@ function renderStatus() {
   const vp = vt ? Math.min(100, (m.vram / vt) * 100) : 0;
   const dls = Object.entries(S.downloads).filter(([, p]) => !p.error && p.total);
   const stateLbl = { ready: t("ready"), starting: t("loading"), runtime: t("runtime"), error: t("error"), stopped: t("stopped") }[i.state] || i.state;
-  const msg = i.state === "stopped" && i.idle_unloaded_min ? t("idleUnloaded", { n: i.idle_unloaded_min }) : i.message || "";
+  const msg = i.state === "stopped" && i.idle_unloaded_min ? t("idleUnloaded", { n: i.idle_unloaded_min }) : i.state === "stopped" && i.crash ? t("serverCrashed", { x: i.crash }) : i.message || "";
   $("#statusbar").innerHTML = `
     <div class="seg state"><span class="dot ${i.state}"></span><b>${esc(stateLbl)}</b>${i.state === "ready" ? `<span class="msg">${esc(shortModel(i.model))} · ${fmtK(i.n_ctx)} ctx</span>` : `<span class="msg" title="${esc(msg)}">${esc(msg)}</span>`}</div>
     <button class="seg engine-btn ${S.engineOpen ? "on" : ""}" id="engineBtn" title="${t("engineStats")}">${icon("chip")}</button>
@@ -1355,6 +1355,7 @@ listen("server-status", (e) => {
     refreshModels();
     if (S.info.state === "error") toast(S.info.message, true);
     if (S.info.state === "stopped" && S.info.idle_unloaded_min) toast(t("idleUnloaded", { n: S.info.idle_unloaded_min }));
+    if (S.info.state === "stopped" && S.info.crash) toast(t("serverCrashed", { x: S.info.crash }), true);
   }
   if (S.view === "models") renderModels();
 });
@@ -1457,6 +1458,7 @@ listen("chat-event", (e) => {
       if (n) n.outerHTML = `<div class="confirm done">${icon(p.decision === "deny" ? "x" : "check")}${esc(t(p.decision === "deny" ? "confirmDenied" : "confirmAllowed"))}</div>`;
       break;
     }
+    case "notice": toast(t(p.key)); break;
     case "error": {
       if (S.live) { S.live.seg.remove(); S.live = null; }
       $("#thread").appendChild(el(`<div class="err-box">${icon("warn")} ${esc(p.error)}</div>`));

@@ -124,6 +124,8 @@ impl Default for Settings {
 pub struct LlmInfo {
     /// "stopped" | "runtime" | "starting" | "ready" | "error"
     pub state: String,
+    /// Set when llama-server died on its own ("exit code 0xc0000005 (access violation)"); cleared on load.
+    pub crash: String,
     pub model: Option<String>,
     pub n_ctx: u32,
     pub port: u16,
@@ -167,6 +169,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> anyhow::Result<Self> {
         let paths = Paths::resolve();
+        init_log_file(&paths.root.join("logs"));
         let db = Db::open(&paths.data.join("lumen.db"))?;
         let settings = load_settings(&paths);
         let http = reqwest::Client::builder()
@@ -221,8 +224,47 @@ impl AppState {
 /// Lines kept in the in-memory log shown under Settings → Server logs.
 const MAX_LOG_LINES: usize = 600;
 
-/// Appends a line to the shared log ring (also used by the llama-server output readers).
+/// The on-disk copy of the log (LumenData/logs/lumen.log), so the reason for a crash survives the app
+/// closing. Rotated to lumen.old.log at 8 MB.
+struct LogFile {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    size: u64,
+}
+static LOG_FILE: std::sync::OnceLock<Mutex<LogFile>> = std::sync::OnceLock::new();
+const LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Opens LumenData/logs/lumen.log for appending (once, at start-up).
+pub fn init_log_file(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join("lumen.log");
+    let open = |p: &Path| std::fs::OpenOptions::new().create(true).append(true).open(p).ok();
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let _ = LOG_FILE.set(Mutex::new(LogFile { file: open(&path), size, path }));
+    push_log_file(&format!("----- Lumen {} started -----", env!("CARGO_PKG_VERSION")));
+}
+
+fn push_log_file(line: &str) {
+    use std::io::Write;
+    let Some(lf) = LOG_FILE.get() else { return };
+    let mut lf = lf.lock();
+    if lf.size > LOG_MAX_BYTES {
+        lf.file = None;
+        let _ = std::fs::rename(&lf.path, lf.path.with_file_name("lumen.old.log"));
+        lf.file = std::fs::OpenOptions::new().create(true).append(true).open(&lf.path).ok();
+        lf.size = 0;
+    }
+    let (now, ..) = crate::calc::local_now();
+    let row = format!("{now} {line}\n");
+    lf.size += row.len() as u64;
+    if let Some(f) = lf.file.as_mut() {
+        let _ = f.write_all(row.as_bytes());
+    }
+}
+
+/// Appends a line to the shared log ring (also used by the llama-server output readers) and to the log file.
 pub fn push_log(logs: &Mutex<Vec<String>>, line: String) {
+    push_log_file(&line);
     let mut l = logs.lock();
     l.push(line);
     if l.len() > MAX_LOG_LINES {
@@ -266,4 +308,21 @@ pub fn now_ms() -> i64 {
 
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Log lines reach LumenData/logs/lumen.log, not just the in-memory ring.
+    #[test]
+    fn log_lines_are_written_to_disk() {
+        let state = AppState::new().unwrap();
+        let marker = format!("[llm] test line {}", new_id());
+        push_log(&state.logs, marker.clone());
+        let text = std::fs::read_to_string(state.paths.root.join("logs").join("lumen.log")).unwrap();
+        let line = text.lines().find(|l| l.ends_with(&marker)).expect("line in the log file");
+        println!("{line}");
+        assert!(line.len() > marker.len() + 18, "has a timestamp");
+    }
 }

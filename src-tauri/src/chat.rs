@@ -408,6 +408,15 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
                     }
                 })?
             }
+            Err(e) if llm::is_connection_error(&e) && !cancel.load(Ordering::Relaxed) => {
+                // llama-server died or dropped the connection (e.g. after a long audit): bring it back and retry
+                state.log(format!("lost the connection to llama-server: {e}"));
+                emit(app, chat_id, "notice", json!({"key": "serverRestarting"}));
+                crate::server::recover(app).await.map_err(|re| anyhow!("The model server stopped and could not be restarted: {re}"))?;
+                stream_assistant(app, chat_id, body, cancel, json!({}))
+                    .await
+                    .map_err(|e2| if llm::is_connection_error(&e2) { anyhow!("The model server stopped again while answering. Its last output is in LumenData\\logs\\lumen.log (Settings → Server logs). Try a smaller request, a smaller context size, or another model.") } else { e2 })?
+            }
             Err(e) => return Err(e),
         };
         if r.cancelled || r.tool_calls.is_empty() {

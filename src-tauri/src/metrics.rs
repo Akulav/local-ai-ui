@@ -124,6 +124,7 @@ pub fn spawn(app: AppHandle) {
             } else if tick.is_multiple_of(2) {
                 engine = engine_counters(&state, port);
             }
+            crate::server::check_alive(&app);
             check_idle(&app, &state);
             let live = *state.live_tps.read();
             let avg = model.as_deref().map(|m| state.db.avg_tps(m)).unwrap_or(0.0);
