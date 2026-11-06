@@ -19,5 +19,11 @@ $body = $m.Groups[1].Value.Trim()
 $content = ($body -split "`n" | Where-Object { $_.Trim() -notmatch '^(#+ .*|-\s*)?$' })
 if (-not $content) { throw "CHANGELOG.md section for $Version is empty - describe the release first" }
 
-$body += "`n`n---`n**Windows x64.** Portable: unzip and run ``Lumen.exe`` (models and chats are stored in ``LumenData`` next to it). Installer: run the ``-setup.exe``.`n`nMade by Akulav."
+$body += "`n`n---`n" +
+    "| System | Download | |`n|---|---|---|`n" +
+    "| **Windows** 10/11 x64 | ``Lumen-setup.exe`` | setup wizard, per user, no admin rights |`n" +
+    "| **macOS** Apple Silicon | ``Lumen-macos-arm64.dmg`` | drag Lumen to Applications |`n" +
+    "| **Linux** x64 | ``lumen-linux-x64`` | ``chmod +x lumen-linux-x64`` and run it: it installs itself (app menu) |`n`n" +
+    "Already have Lumen? Use **Update** in the app (or the tray menu). Every file is listed in ``SHA256SUMS.txt``.`n`n" +
+    "Made by Akulav."
 if ($OutFile) { [IO.File]::WriteAllText($OutFile, $body) } else { $body }

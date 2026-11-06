@@ -33,8 +33,17 @@ unicode-normalization = "0.1"
 urlencoding = "2"
 semver = "1"
 sha2 = "0.10"
+# llama.cpp ships .tar.gz builds for Linux and macOS (Windows: .zip)
+flate2 = "1"
+tar = "0.4"
 
-[dependencies.windows]
+# Linux / macOS: process memory and CPU for the engine panel, free memory for the prompt cache cap,
+# process groups and the parent-death signal for child servers
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
   "Win32_Foundation",

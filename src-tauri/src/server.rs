@@ -47,17 +47,47 @@ fn set_status(app: &AppHandle, f: impl FnOnce(&mut crate::state::LlmInfo)) {
     emit_status(app);
 }
 
+/// Size of llama-server's RAM prompt cache (`--cache-ram`, MiB) for the memory free at start.
+///
+/// When a request with another prompt arrives (a chat title, a summary, research steps, another
+/// chat), llama-server copies the whole state of the current conversation into ordinary RAM so it
+/// can come back to it. Its default allows 8 GiB, and for a 27B model a long chat is a single block
+/// of several GB: once the commit limit (RAM + page file) is reached that allocation throws
+/// std::bad_alloc and the request fails with "bad allocation". llama-server skips a state larger
+/// than the cap before allocating it, so a quarter of the free memory (at most 4 GiB) keeps short
+/// chats cached and never risks the big copies.
+pub fn prompt_cache_mib(available_mib: Option<u64>) -> u64 {
+    match available_mib {
+        Some(free) => {
+            let cap = (free / 4).min(4096);
+            if cap < 256 { 0 } else { cap }
+        }
+        None => 1024,
+    }
+}
+
 /// Spawns llama-server without a console window, tied to the app's job object, with piped output.
 fn spawn_server(state: &AppState, exe: &Path, args: &[String]) -> Result<(Child, u32)> {
-    let child = Command::new(exe)
-        .args(args)
-        .current_dir(exe.parent().unwrap_or(Path::new(".")))
+    let dir = exe.parent().unwrap_or(Path::new("."));
+    let mut cmd = Command::new(exe);
+    cmd.args(args)
+        .current_dir(dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null())
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    crate::platform::quiet(&mut cmd);
+    // Linux builds of llama.cpp keep their .so files beside llama-server
+    #[cfg(target_os = "linux")]
+    {
+        let mut lib = std::ffi::OsString::from(dir.as_os_str());
+        if let Some(old) = std::env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
+            lib.push(":");
+            lib.push(old);
+        }
+        cmd.env("LD_LIBRARY_PATH", lib);
+    }
+    let child = cmd.spawn()?;
     let pid = child.id().unwrap_or(0);
     state.job.adopt(pid);
     Ok((child, pid))
@@ -305,6 +335,11 @@ pub async fn start_llm(app: &AppHandle, model_file: &str) -> Result<()> {
         args.push("--gpu-layers".into());
         args.push("0".into());
     }
+    let free = crate::platform::available_memory_mb();
+    let cache = prompt_cache_mib(free);
+    state.log(format!("[lumen] free memory {} MiB -> RAM prompt cache {cache} MiB", free.map(|f| f.to_string()).unwrap_or_else(|| "?".into())));
+    args.push("--cache-ram".into());
+    args.push(cache.to_string());
 
     state.log(format!("[lumen] starting llama-server {}", args.join(" ")));
     set_status(app, |i| {
@@ -444,7 +479,8 @@ pub async fn stop_all(app: &AppHandle) {
 mod tests {
     use super::*;
 
-    /// Real processes exiting the way a crashed llama-server does.
+    /// Real processes exiting the way a crashed llama-server does (Windows exit codes).
+    #[cfg(windows)]
     #[test]
     fn exit_codes_are_named() {
         let run = |code: &str| std::process::Command::new("cmd").args(["/C", &format!("exit {code}")]).status().unwrap();
@@ -452,5 +488,15 @@ mod tests {
         assert_eq!(describe_exit(&run("3")), "exit code 3 (abort / failed assertion)");
         assert_eq!(describe_exit(&run("-1073741819")), "exit code 0xc0000005 (access violation)");
         assert_eq!(describe_exit(&run("-1073740791")), "exit code 0xc0000409 (abort / failed assertion)");
+    }
+
+    #[test]
+    fn prompt_cache_fits_free_memory() {
+        // 7.5 GB free (the machine where "bad allocation" happened): a quarter, so a 2-3 GB chat
+        // snapshot of a 27B model is skipped instead of allocated
+        assert_eq!(prompt_cache_mib(Some(7_680)), 1_920);
+        assert_eq!(prompt_cache_mib(Some(64_000)), 4_096, "never more than 4 GiB");
+        assert_eq!(prompt_cache_mib(Some(800)), 0, "too little memory: no RAM cache at all");
+        assert_eq!(prompt_cache_mib(None), 1_024, "unknown: a modest cap instead of the 8 GiB default");
     }
 }

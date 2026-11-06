@@ -12,9 +12,11 @@ use crate::db::Db;
 use crate::rag::ProjectIndex;
 use crate::server::ServerProc;
 use crate::updater::UpdateInfo;
-use crate::win::Job;
+use crate::platform::Job;
 
-/// Portable layout: everything lives next to the exe (falls back to %LOCALAPPDATA% when not writable).
+/// Where everything lives: `LumenData` next to the program (Windows install folder, the Linux install in
+/// ~/.local/share/lumen, a portable copy), else the user's app-data folder. macOS always uses
+/// ~/Library/Application Support/Lumen: an app bundle must not be written into.
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub root: PathBuf,
@@ -31,11 +33,17 @@ impl Paths {
             .ok()
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("."));
-        let mut root = exe_dir.join("LumenData");
-        if std::fs::create_dir_all(&root).is_err() || !writable(&root) {
-            let base = std::env::var("LOCALAPPDATA").map(PathBuf::from).unwrap_or(exe_dir);
-            root = base.join("Lumen");
-        }
+        let root = if cfg!(target_os = "macos") {
+            user_data_dir().unwrap_or_else(|| exe_dir.join("LumenData"))
+        } else {
+            let beside = exe_dir.join("LumenData");
+            if std::fs::create_dir_all(&beside).is_ok() && writable(&beside) {
+                beside
+            } else {
+                user_data_dir().unwrap_or(beside)
+            }
+        };
+        let _ = std::fs::create_dir_all(&root);
         let p = Paths {
             runtime: root.join("runtime"),
             models: root.join("models"),
@@ -49,6 +57,20 @@ impl Paths {
         }
         p
     }
+}
+
+/// The per-user app-data folder: %LOCALAPPDATA%\Lumen, ~/Library/Application Support/Lumen,
+/// or $XDG_DATA_HOME/lumen (~/.local/share/lumen).
+pub fn user_data_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Lumen"));
+    }
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    if cfg!(target_os = "macos") {
+        return Some(home.join("Library").join("Application Support").join("Lumen"));
+    }
+    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local").join("share"));
+    Some(data.join("lumen"))
 }
 
 fn writable(dir: &Path) -> bool {
@@ -160,6 +182,8 @@ pub struct AppState {
     pub last_activity: AtomicI64,
     pub updates: RwLock<UpdateInfo>,
     pub quitting: AtomicBool,
+    /// No tray icon on this desktop (Linux without an app indicator): closing the window quits.
+    pub no_tray: AtomicBool,
     /// Tool calls that wait for the user to allow a process (git, checks): confirm id → answer.
     pub approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
     /// Per chat, the process scopes ("git", "run") the user allowed for the rest of the session.
@@ -194,6 +218,7 @@ impl AppState {
             last_activity: AtomicI64::new(now_ms()),
             updates: RwLock::new(UpdateInfo::default()),
             quitting: AtomicBool::new(false),
+            no_tray: AtomicBool::new(false),
             approvals: Mutex::new(HashMap::new()),
             allowed_tools: Mutex::new(HashMap::new()),
         })

@@ -1,11 +1,12 @@
-# Fast checks on every push / pull request: the Rust backend compiles, the UI scripts parse,
-# and the three version numbers agree. Full release builds live in release.yml.
 name: CI
+
+# Checks every push to main and every pull request on all three systems: the versions agree, the UI scripts parse,
+# the Rust backend passes clippy (no warnings) and its tests, and the Windows setup compiles.
+# Releases are made by release.yml.
 
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md"]
   pull_request:
   workflow_dispatch:
 
@@ -14,40 +15,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    runs-on: windows-latest
+  version:
+    name: Versions agree
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: package.json and src-tauri/Cargo.toml carry the same number
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          c="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' src-tauri/Cargo.toml | head -n1)"
+          echo "package.json=$v  Cargo.toml=$c"
+          test "$v" = "$c"
+      - name: UI scripts parse
+        run: node --check ui/app.js && node --check ui/i18n.js && node --check scripts/vendor.js
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
+  app:
+    name: App (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux desktop libraries (WebKitGTK, app indicator)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
       - uses: dtolnay/rust-toolchain@stable
-
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          shared-key: lumen
-
-      - name: Install npm packages
-        run: npm ci --no-audit --no-fund
-
-      - name: Check UI scripts parse
-        run: |
-          node --check ui/app.js
-          node --check ui/i18n.js
-          node --check scripts/vendor.js
-
-      - name: Check versions match
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: The Windows setup compiles (src-tauri/installer/lumen.iss)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $cargo = ([regex]'(?m)^version\s*=\s*"([^"]+)"').Match((Get-Content src-tauri/Cargo.toml -Raw)).Groups[1].Value
-          if ($pkg -ne $cargo) { throw "package.json ($pkg) and Cargo.toml ($cargo) versions differ - run npm run version:bump" }
-          Write-Host "version $pkg"
-
-      - name: cargo check
-        working-directory: src-tauri
-        run: cargo check --locked
+          cargo build --locked
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc /Qp "/DAppVersion=0.0.0" "/DExe=$PWD\target\debug\lumen.exe" "/O$env:RUNNER_TEMP" installer\lumen.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

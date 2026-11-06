@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::{now_ms, AppState};
-use crate::win::{process_cpu_time, process_ram, GpuMemCounter};
+use crate::platform::{process_cpu_time, process_ram, GpuMemCounter};
 
 /// Unloads the chat model once it has been ready and unused for `idle_unload_min` minutes.
 /// Never while a chat is generating / compressing / researching (those register in `generations`).

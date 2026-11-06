@@ -2,14 +2,14 @@
 rem ---------------------------------------------------------------------------
 rem  Lumen - one-click build & run (made by Akulav)
 rem
-rem    run.bat          install missing tools, build the exe and the installer, copy them to
-rem                     dist\ (dist\Lumen\Lumen.exe + dist\Lumen_X.Y.Z_x64-setup.exe), launch
+rem    run.bat          install missing tools, build the exe and the setup, copy them to
+rem                     dist\ (dist\Lumen\Lumen.exe + dist\Lumen-setup.exe), launch
 rem    run.bat build    same, but do not launch
-rem    run.bat quick    portable exe only (faster, no installer), then launch
+rem    run.bat quick    portable exe only (faster, no setup), then launch
 rem    run.bat dev      start the app in dev mode (hot reload for ui\)
 rem    run.bat clean    remove build outputs (keeps dist\Lumen\LumenData)
 rem
-rem  Missing tools (Node.js, Rust, VS C++ Build Tools) are installed with winget.
+rem  Missing tools (Node.js, Rust, VS C++ Build Tools, Inno Setup) are installed with winget.
 rem  The Build Tools installer asks for administrator rights once (UAC prompt).
 rem ---------------------------------------------------------------------------
 setlocal

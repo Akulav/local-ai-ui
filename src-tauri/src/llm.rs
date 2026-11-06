@@ -76,7 +76,7 @@ async fn stream_inner(
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(String::from))
             .unwrap_or(text);
-        return Err(anyhow!("llama-server {code}: {msg}"));
+        return Err(anyhow!("{}", server_error(&format!("llama-server {code}: {msg}"))));
     }
 
     let mut res = StreamResult::default();
@@ -104,7 +104,7 @@ async fn stream_inner(
             }
             let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
             if let Some(err) = v.get("error") {
-                return Err(anyhow!("{}", err["message"].as_str().unwrap_or("generation error")));
+                return Err(anyhow!("{}", server_error(err["message"].as_str().unwrap_or("generation error"))));
             }
             if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
                 res.prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
@@ -230,6 +230,20 @@ pub async fn complete(state: &AppState, messages: Value, max_tokens: u32, schema
     Ok(r.content.trim().to_string())
 }
 
+/// Turns llama-server's raw error text into something actionable. "bad allocation" is what MSVC's
+/// std::bad_alloc says: the server could not get memory for this request (see `prompt_cache_mib`).
+pub fn server_error(msg: &str) -> String {
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("bad allocation") || lower.contains("bad_alloc") {
+        return format!(
+            "The model server ran out of memory (RAM + page file) while handling this request ({msg}). \
+             Close programs that use a lot of memory (another AI app, a game), or use a smaller context size; \
+             a larger Windows page file also helps. Your chat is saved – send the message again."
+        );
+    }
+    msg.to_string()
+}
+
 /// True when the request failed because the connection to llama-server broke (refused, reset, closed
 /// mid-stream), as opposed to an HTTP error the server answered with.
 pub fn is_connection_error(e: &anyhow::Error) -> bool {
@@ -300,6 +314,37 @@ mod tests {
             assert!(is_connection_error(&e), "{e:#}");
             // an HTTP error the server answered with (context overflow) is not
             assert!(!is_connection_error(&anyhow!("llama-server 400 Bad Request: request (40678 tokens) exceeds the available context size (39680 tokens)")));
+        });
+    }
+
+    /// llama-server out of memory answers 500 {"error":{"message":"bad allocation"}} (MSVC's
+    /// std::bad_alloc text). The chat must get an explanation, not the bare words, and it must not
+    /// be mistaken for a crash (no restart loop).
+    #[test]
+    fn bad_allocation_is_explained() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = l.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut s, _) = l.accept().await.unwrap();
+                let mut buf = [0u8; 65536];
+                let _ = s.read(&mut buf).await;
+                let body = r#"{"error":{"code":500,"message":"bad allocation","type":"server_error"}}"#;
+                let resp = format!("HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+            let state = AppState::new().unwrap();
+            {
+                let mut i = state.info.write();
+                i.state = "ready".into();
+                i.port = port;
+            }
+            let e = stream_chat(&state, json!({"messages": []}), &AtomicBool::new(false), |_| {}).await.unwrap_err();
+            let text = e.to_string();
+            println!("{text}");
+            assert!(text.contains("ran out of memory") && text.contains("bad allocation"), "{text}");
+            assert!(!is_connection_error(&e));
         });
     }
 }

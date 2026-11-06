@@ -23,7 +23,12 @@ mod state;
 mod tools;
 mod updater;
 mod web;
-mod win;
+// system specifics behind one interface: win.rs on Windows, unix.rs on Linux and macOS
+#[cfg_attr(windows, path = "win.rs")]
+#[cfg_attr(not(windows), path = "unix.rs")]
+mod platform;
+#[cfg(not(windows))]
+mod install;
 
 use serde_json::json;
 use std::sync::atomic::Ordering;
@@ -101,6 +106,16 @@ pub async fn shutdown(app: &AppHandle) {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--version") {
+        println!("Lumen {} (made by Akulav)", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    // Linux: the downloaded program installs itself (app menu entry) and runs from there; also handles
+    // --uninstall. Returns false when this process should end (the installed copy took over).
+    #[cfg(not(windows))]
+    if !install::first_run() {
+        return;
+    }
     let state = Arc::new(AppState::new().expect("failed to initialise Lumen data folder"));
 
     let app = tauri::Builder::default()
@@ -158,13 +173,14 @@ fn main() {
                 updater::cleanup(&st);
                 st.updates.write().current = handle.package_info().version.to_string();
             }
+            #[cfg(windows)]
             if let Some(w) = handle.get_webview_window("main") {
                 if let Ok(h) = w.hwnd() {
-                    win::set_window_icons(h.0 as isize);
+                    platform::set_window_icons(h.0 as isize);
                 }
             }
             let menu = tray_menu(&handle, &UpdateInfo::default())?;
-            TrayIconBuilder::with_id(TRAY_ID)
+            let tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().cloned().expect("icon"))
                 .tooltip("Lumen – local AI · made by Akulav")
                 .menu(&menu)
@@ -194,7 +210,14 @@ fn main() {
                         show_main(tray.app_handle());
                     }
                 })
-                .build(app)?;
+                .build(app);
+            // (a Linux desktop without an app indicator has no tray: Lumen still runs, and closing the
+            // window then quits instead of hiding it where nothing could bring it back)
+            if let Err(e) = tray {
+                let st = handle.state::<Arc<AppState>>();
+                st.log(format!("[lumen] no tray icon on this desktop ({e}); closing the window quits Lumen"));
+                st.no_tray.store(true, Ordering::Relaxed);
+            }
 
             metrics::spawn(handle.clone());
             updater::spawn_background(handle.clone());
@@ -227,7 +250,7 @@ fn main() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 let state = app.state::<Arc<AppState>>();
-                if state.settings.read().close_to_tray && !state.quitting.load(Ordering::Relaxed) {
+                if state.settings.read().close_to_tray && !state.quitting.load(Ordering::Relaxed) && !state.no_tray.load(Ordering::Relaxed) {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -236,10 +259,14 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Lumen");
 
-    app.run(|app, event| {
-        if let RunEvent::Exit = event {
+    app.run(|app, event| match event {
+        RunEvent::Exit => {
             let app = app.clone();
             tauri::async_runtime::block_on(async move { shutdown(&app).await });
         }
+        // macOS: clicking the Dock icon brings back a window that was closed to the menu bar
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => show_main(app),
+        _ => {}
     });
 }

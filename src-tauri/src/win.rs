@@ -1,5 +1,8 @@
-//! Windows specifics: a kill-on-close job object (child servers die with the app, even on crash),
-//! per-process RAM, and per-process VRAM through the "GPU Process Memory" performance counters.
+//! Windows side of `crate::platform` (Linux / macOS: unix.rs, same functions): a kill-on-close job
+//! object (child servers die with the app, even on crash), hidden console windows, per-process RAM,
+//! and per-process VRAM / GPU load through the "GPU Process Memory" / "GPU Engine" counters.
+
+use std::path::PathBuf;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
@@ -38,6 +41,48 @@ impl Job {
             }
         }
     }
+}
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Child processes never open a console window.
+pub fn quiet(cmd: &mut tokio::process::Command) {
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// `quiet` for std commands.
+fn quiet_std(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// (Unix: own process group.) On Windows `kill_tree` finds the children by itself.
+pub fn own_group(_cmd: &mut tokio::process::Command) {}
+
+/// Kills a process and everything it started.
+pub fn kill_tree(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let mut c = std::process::Command::new("taskkill");
+    c.args(["/T", "/F", "/PID", &pid.to_string()]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    quiet_std(&mut c);
+    let _ = c.status();
+}
+
+/// The shell for `run_command`: (program, leading args, the command line passed verbatim).
+pub fn shell(command: &str) -> (PathBuf, Vec<String>, Option<String>) {
+    let comspec = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("cmd.exe"));
+    (comspec, vec!["/D".into(), "/S".into(), "/C".into()], Some(format!("\"{command}\"")))
+}
+
+/// Memory a new allocation can still get, in MiB: the free part of the commit limit (RAM + page file).
+/// Windows refuses an allocation past the commit limit even while physical RAM is free.
+pub fn available_memory_mb() -> Option<u64> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut m = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    unsafe { GlobalMemoryStatusEx(&mut m) }.ok()?;
+    Some(m.ullAvailPageFile / (1024 * 1024))
 }
 
 /// The app icon, embedded so the window can get crisp big and small icons at any DPI.

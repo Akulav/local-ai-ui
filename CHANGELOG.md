@@ -7,6 +7,23 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+### Added
+- Linux (x86-64) and macOS (Apple Silicon) versions, built automatically with Windows on every release. Linux: one
+  program that installs itself (app menu entry); macOS: Lumen.app in a disk image. llama.cpp runs with Vulkan/ROCm/CPU
+  on Linux and Metal on macOS.
+- New Windows setup (Inno Setup, English/Romanian): `Lumen-setup.exe` is the only Windows file and also the update.
+  Existing installs (0.8 and earlier) are taken over in place; LumenData is kept.
+- Check for updates button in the sidebar and Settings, next to the Update button.
+- "Made by Akulav" on the welcome screen, in the setup, the exe and the macOS app.
+
+### Changed
+- Releases build and publish all three systems with one checksum list; the release notes list the file per system.
+- README and CLAUDE.md rewritten for the new layout.
+
+### Fixed
+- "bad allocation" in long chats: llama-server copied whole conversations into its RAM prompt cache (up to 8 GB) and
+  ran out of memory (RAM + page file). The cache is now sized from the free memory, and the error is explained.
+
 ## [0.8.1] - 2026-11-05
 
 ### Fixed

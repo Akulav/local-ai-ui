@@ -1,0 +1,11 @@
+Auto builds for linux + windows + macos (arm only)
+Make setup, update work just like https://github.com/Akulav/ai-girlfriend with inno setup installer. 1 binary for each os, no different binaries for update and setup. 
+Check for updates button and update button. 
+Add in-app branding: Made by Akulav
+Structure the readme in similar way as https://github.com/Akulav/ai-girlfriend
+Clean claude.md with updates
+Structure github workflow and release logic just like https://github.com/Akulav/ai-girlfriend
+Make sure the exe, setup and process have icons
+Fix error I had in last chat: "Bad allocation"
+Auto-commit with the changelog
+Bump version

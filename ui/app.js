@@ -179,16 +179,18 @@ function renderSidebarStatic() {
   $("#navSettings").innerHTML = icon("gear") + `<span class="t">${t("settings")}</span>`;
   $("#navModels").classList.toggle("on", S.view === "models");
   $("#navSettings").classList.toggle("on", S.view === "settings");
-  $("#credit").innerHTML = `<span>${t("madeBy")} <b>Akulav</b></span><span>v${esc(S.version)}</span>`;
+  const checking = S.updates?.checking;
+  $("#credit").innerHTML = `<span>${t("madeBy")} <b>Akulav</b></span><span class="ver">v${esc(S.version)}<button id="creditCheck" title="${t("checkUpdates")}" ${checking ? "disabled" : ""}>${checking ? '<span class="spinner"></span>' : icon("refresh")}</button></span>`;
   renderUpdateNav();
 }
+$("#credit").addEventListener("click", (e) => { if (e.target.closest("#creditCheck")) checkUpdatesNow(); });
 
 // ---------------------------------------------------------------- updates
 /** Sidebar entries that appear only when GitHub has something newer (same entries as the tray menu). */
 function renderUpdateNav() {
   const u = S.updates || {};
   let html = "";
-  if (u.app) html += `<div class="item update" data-upd="app">${icon("download")}<span class="t">${t("updateApp", { v: esc(u.app.version) })}</span></div>`;
+  if (u.app && !u.self_built) html += `<div class="item update" data-upd="app">${icon("download")}<span class="t">${t("updateApp", { v: esc(u.app.version) })}</span></div>`;
   if (u.runtime) html += `<div class="item update rt" data-upd="runtime">${icon("chip")}<span class="t">${t("updateRuntime", { v: esc(u.runtime) })}</span></div>`;
   if (u.installing) html = `<div class="item update"><span class="spinner"></span><span class="t">${t("updateInstalling")}</span></div>`;
   $("#navUpdate").innerHTML = html;
@@ -201,6 +203,7 @@ $("#navUpdate").addEventListener("click", (e) => {
 async function promptAppUpdate() {
   const a = S.updates.app;
   if (!a || S.updates.installing) return;
+  if (S.updates.self_built) return toast(t("selfBuilt"), true);
   const busy = Object.values(S.busy).some(Boolean);
   const text = t("updateConfirm", { v: a.version }) + (busy ? "\n\n" + t("updateBusy") : "");
   if (!(await confirmBox(text, t("updateNow")))) return;
@@ -534,7 +537,7 @@ function welcome() {
   const noModels = !S.models.length;
   const rec = S.catalog.find((c) => c.recommended);
   const dl = rec && S.downloads["model:" + rec.file];
-  const w = el(`<div class="welcome"><img src="logo.png" alt=""/><h1>${t("welcomeTitle")}</h1><p>${t("welcomeSub")}</p></div>`);
+  const w = el(`<div class="welcome"><img src="logo.png" alt=""/><h1>${t("welcomeTitle")}</h1><p>${t("welcomeSub")}</p><div class="made-by">Lumen · ${t("madeBy")} <b>Akulav</b></div></div>`);
   if (noModels && rec) {
     const card = el(`<div class="setup-card"><div class="nm" style="display:flex;gap:10px;align-items:center;font-weight:600">${icon("sparkle")}${t("setupTitle")}</div>
       <div style="color:var(--text-2)">${t("setupBody")}</div>
@@ -1135,7 +1138,9 @@ function renderSettings() {
   html += f(t("uiLang"), "", sel("ui_lang", [["en", "English"], ["ro", "Română"]]));
   html += f(t("replyLang"), t("replyLangHint"), sel("reply_lang", [["auto", t("auto")], ["en", "English"], ["ro", "Română"]]));
   html += `<h3>${icon("chip")}${t("engine")}</h3>`;
-  html += f(t("backend"), t("backendHint"), sel("backend", [["vulkan", t("vulkanRec")], ["rocm", "ROCm / HIP"], ["cpu", t("cpuOnly")]]));
+  // (macOS has one llama.cpp build, Metal: runtime.rs `effective_backend`)
+  const backends = S.os === "macos" ? [["metal", t("metalRec")], ["cpu", t("cpuOnly")]] : [["vulkan", t("vulkanRec")], ["rocm", "ROCm / HIP"], ["cpu", t("cpuOnly")]];
+  html += f(t("backend"), S.os === "macos" ? t("backendHintMac") : t("backendHint"), sel("backend", backends));
   html += f(t("runtimeVer"), esc(S.runtime || "—"), `<button class="btn" id="updRt">${icon("download")}${t("update")}</button>`);
   html += f(t("ctxSize"), t("ctxSizeHint"), sel("ctx_size", [[0, t("auto")], [8192, "8k"], [16384, "16k"], [32768, "32k"], [65536, "64k"], [131072, "128k"], [262144, "256k"]]));
   html += f(t("kv"), t("kvHint"), sel("kv_cache", [["q8_0", "q8_0"], ["f16", "f16"], ["q4_0", "q4_0"]]));
@@ -1162,11 +1167,10 @@ function renderSettings() {
   html += `<h3>${icon("bolt")}${t("shortcuts")}</h3><div class="shortcuts">${SHORTCUTS.map(([k, d]) => `<div><kbd>${k}</kbd><span>${t(d)}</span></div>`).join("")}</div>`;
   html += `<h3>${icon("sparkle")}${t("about")}</h3><div class="about"><img src="logo.png" alt=""/><div><div class="ttl">Lumen v${esc(S.version)}</div><small>${t("madeBy")} Akulav · Tauri + Rust + llama.cpp ${esc(S.runtime || "")}</small></div></div>`;
   const u = S.updates || {};
-  const upd = u.checking ? `<span class="spinner"></span>`
-    : u.app ? `<button class="btn primary" id="installUpd">${icon("download")}${t("updateApp", { v: esc(u.app.version) })}</button>`
-    : `<button class="btn" id="checkUpd">${icon("refresh")}${t("checkNow")}</button>`;
-  const status = u.app ? t("updateAvailable", { v: esc(u.app.version) }) + (u.app.url ? ` · <a href="${esc(u.app.url)}">${t("releaseNotes")}</a>` : "")
-    : u.checked_at ? t("lastChecked", { x: esc(fmtTime(u.checked_at)) }) : t("notChecked");
+  // both buttons: check any time, update when GitHub has a newer release (never for a copy built from source)
+  const upd = `<div class="btn-row">${u.app && !u.self_built ? `<button class="btn primary" id="installUpd" ${u.installing ? "disabled" : ""}>${icon("download")}${t("updateApp", { v: esc(u.app.version) })}</button>` : ""}<button class="btn" id="checkUpd" ${u.checking ? "disabled" : ""}>${u.checking ? '<span class="spinner"></span>' : icon("refresh")}${t("checkUpdates")}</button></div>`;
+  const status = (u.app ? t("updateAvailable", { v: esc(u.app.version) }) + (u.app.url ? ` · <a href="${esc(u.app.url)}">${t("releaseNotes")}</a>` : "")
+    : u.checked_at ? t("lastChecked", { x: esc(fmtTime(u.checked_at)) }) : t("notChecked")) + (u.self_built ? `<br>${t("selfBuilt")}` : "");
   html += f(t("updates"), status + (u.error ? `<br><span style="color:var(--bad)">${esc(u.error)}</span>` : ""), upd);
   if (u.runtime) html += f(t("runtimeVer"), t("runtimeAvailable", { a: esc(u.runtime_current || "—"), b: esc(u.runtime) }), `<button class="btn primary" id="rtUpd">${icon("download")}${t("update")}</button>`);
   html += f(t("autoCheck"), t("autoCheckHint"), sw("check_updates"));
@@ -1364,7 +1368,7 @@ listen("update-status", (e) => {
   const prev = S.updates?.app?.version;
   S.updates = e.payload;
   if (S.updates.app && S.updates.app.version !== prev) toast(t("updateAvailable", { v: S.updates.app.version }));
-  renderUpdateNav();
+  renderSidebarStatic(); // (the credit row's check button and the Update entries)
   if (S.view === "settings") renderSettings();
 });
 // tray menu → the window confirms and shows progress
@@ -1494,6 +1498,7 @@ document.addEventListener("keydown", (e) => {
   const st = await invoke("get_state");
   S.settings = st.settings; S.info = st.info; S.catalog = st.catalog; S.root = st.root; S.runtime = st.runtime; S.version = st.version;
   S.updates = st.updates || {};
+  S.os = st.os || "windows";
   S.toggles.think = !!S.settings.thinking;
   await Promise.all([refreshChats(), refreshProjects(), refreshModels()]);
   showView("chat");

@@ -26,10 +26,9 @@
     }
   },
   "bundle": {
-    "active": true,
-    "targets": ["nsis"],
+    "active": false,
     "publisher": "Akulav",
-    "copyright": "Copyright (c) Akulav",
+    "copyright": "Made by Akulav",
     "category": "Productivity",
     "shortDescription": "Lumen - local AI",
     "longDescription": "Chat with local language models on your own PC. Nothing leaves the computer.",
@@ -38,21 +37,8 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser",
-        "languages": ["English", "Romanian"],
-        "customLanguageFiles": { "Romanian": "installer/Romanian.nsh" },
-        "displayLanguageSelector": true,
-        "installerIcon": "icons/icon.ico",
-        "uninstallerIcon": "icons/icon.ico",
-        "headerImage": "installer/header.bmp",
-        "sidebarImage": "installer/sidebar.bmp",
-        "installerHooks": "installer/hooks.nsh",
-        "compression": "lzma"
-      }
-    }
+    ]
   }
 }

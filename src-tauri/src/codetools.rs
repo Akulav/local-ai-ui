@@ -5,7 +5,6 @@
 use anyhow::{anyhow, Result};
 use regex::{Regex, RegexBuilder};
 use serde_json::{json, Value};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -430,13 +429,13 @@ pub async fn confirm(app: &AppHandle, chat_id: &str, call_id: &str, scope: &str,
     }
 }
 
-/// Finds git: PATH, Git for Windows, then the copy bundled with GitHub Desktop.
+/// Finds git: PATH, then (Windows) Git for Windows and the copy bundled with GitHub Desktop.
 pub fn git_exe() -> Option<PathBuf> {
     static GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
     GIT.get_or_init(|| {
         if let Some(path) = std::env::var_os("PATH") {
             for dir in std::env::split_paths(&path) {
-                let p = dir.join("git.exe");
+                let p = dir.join(format!("git{}", std::env::consts::EXE_SUFFIX));
                 if p.is_file() {
                     return Some(p);
                 }
@@ -468,12 +467,18 @@ pub struct ProcOut {
 
 /// Runs a process without a console window inside the app's job object, with a timeout; stdout and
 /// stderr are merged (stderr after stdout). The whole process tree is killed on timeout / stop.
-pub async fn run_process(job: &crate::win::Job, exe: &Path, args: &[String], raw: Option<&str>, cwd: &Path, timeout: Duration, cancel: &AtomicBool) -> Result<ProcOut> {
+/// `raw` is passed verbatim on Windows (cmd.exe quoting) and as one more argument elsewhere.
+pub async fn run_process(job: &crate::platform::Job, exe: &Path, args: &[String], raw: Option<&str>, cwd: &Path, timeout: Duration, cancel: &AtomicBool) -> Result<ProcOut> {
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args(args);
     if let Some(r) = raw {
+        #[cfg(windows)]
         cmd.raw_arg(r);
+        #[cfg(not(windows))]
+        cmd.arg(r);
     }
+    crate::platform::quiet(&mut cmd);
+    crate::platform::own_group(&mut cmd);
     cmd.current_dir(cwd)
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat")
@@ -483,7 +488,6 @@ pub async fn run_process(job: &crate::win::Job, exe: &Path, args: &[String], raw
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| anyhow!("cannot start {}: {e}", exe.display()))?;
     let pid = child.id().unwrap_or(0);
@@ -511,7 +515,7 @@ pub async fn run_process(job: &crate::win::Job, exe: &Path, args: &[String], raw
     };
     if status.is_none() {
         // kill the tree while the parent still exists, so grandchildren (cargo, node…) die too
-        kill_tree(pid);
+        crate::platform::kill_tree(pid);
         let _ = child.kill().await;
     }
     let grace = Duration::from_secs(3);
@@ -526,18 +530,6 @@ pub async fn run_process(job: &crate::win::Job, exe: &Path, args: &[String], raw
         text.push_str(&err);
     }
     Ok(ProcOut { code: status.and_then(|s| s.code()), output: text, timed_out, cancelled: was_cancelled })
-}
-
-fn kill_tree(pid: u32) {
-    if pid == 0 {
-        return;
-    }
-    let _ = std::process::Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(0x08000000)
-        .status();
 }
 
 /// UTF-8 when valid, else Latin-1-ish lossy (console tools on Windows may print in the OEM code page).
@@ -738,11 +730,11 @@ pub async fn run_command(g: &GitCtx<'_>, a: &Value) -> Result<(String, Value)> {
     let timeout = a["timeout_sec"].as_u64().unwrap_or(180).clamp(5, 900);
     confirm(g.app, g.chat_id, g.call_id, "run", command, &cwd.to_string_lossy(), g.cancel).await?;
     let state = g.app.state::<Arc<AppState>>().inner().clone();
-    let comspec = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("cmd.exe"));
+    let (shell, shell_args, line) = crate::platform::shell(command);
     let started = std::time::Instant::now();
     // keep the model from being unloaded during long test runs
     state.touch();
-    let o = run_process(&state.job, &comspec, &["/D".into(), "/S".into(), "/C".into()], Some(&format!("\"{command}\"")), &cwd, Duration::from_secs(timeout), g.cancel).await?;
+    let o = run_process(&state.job, &shell, &shell_args, line.as_deref(), &cwd, Duration::from_secs(timeout), g.cancel).await?;
     state.touch();
     let secs = started.elapsed().as_secs_f32();
     let status = if o.timed_out {
@@ -819,7 +811,7 @@ mod tests {
         assert!(resolve(Path::new(&repo), "../outside.txt").is_err());
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let job = crate::win::Job::new();
+        let job = crate::platform::Job::new();
         let no = AtomicBool::new(false);
         rt.block_on(async {
             let git = git_exe().expect("git");
@@ -831,13 +823,14 @@ mod tests {
             println!("--- git diff --stat\n{}", o.output);
             let files = split_diff(&run_process(&job, &git, &["--no-pager".into(), "diff".into()], None, Path::new(&repo), Duration::from_secs(30), &no).await.unwrap().output);
             println!("split into {} files: {:?}", files.len(), files.iter().map(|f| f["path"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>());
-            let cmd = std::env::var_os("ComSpec").map(PathBuf::from).unwrap();
-            let o = run_process(&job, &cmd, &["/D".into(), "/S".into(), "/C".into()], Some("\"echo hello && echo oops 1>&2 && exit 3\""), Path::new(&repo), Duration::from_secs(30), &no).await.unwrap();
-            println!("--- cmd: {:?} exit {:?}", o.output, o.code);
+            let (sh, sh_args, line) = crate::platform::shell("echo hello && echo oops 1>&2 && exit 3");
+            let o = run_process(&job, &sh, &sh_args, line.as_deref(), Path::new(&repo), Duration::from_secs(30), &no).await.unwrap();
+            println!("--- shell: {:?} exit {:?}", o.output, o.code);
             assert_eq!(o.code, Some(3));
             assert!(o.output.contains("hello") && o.output.contains("oops"));
             let t0 = std::time::Instant::now();
-            let o = run_process(&job, &cmd, &["/D".into(), "/S".into(), "/C".into()], Some("\"ping -n 30 127.0.0.1\""), Path::new(&repo), Duration::from_secs(2), &no).await.unwrap();
+            let (sh, sh_args, line) = crate::platform::shell(if cfg!(windows) { "ping -n 30 127.0.0.1" } else { "sleep 30" });
+            let o = run_process(&job, &sh, &sh_args, line.as_deref(), Path::new(&repo), Duration::from_secs(2), &no).await.unwrap();
             println!("--- timeout: timed_out={} after {:?}, partial output {} chars", o.timed_out, t0.elapsed(), o.output.len());
             assert!(o.timed_out && t0.elapsed() < Duration::from_secs(10));
         });

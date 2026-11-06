@@ -1,7 +1,8 @@
 # Lumen build script, called by run.bat.
-# Installs whatever is missing (Node.js, Rust, MSVC C++ Build Tools), builds the release exe and the
-# NSIS installer, drops the exe into dist\Lumen next to the portable LumenData folder (models/chats are
-# never touched) and the installer into dist\. Mode "quick" skips the installer.
+# Installs whatever is missing (Node.js, Rust, MSVC C++ Build Tools, Inno Setup), builds the release exe
+# and the Windows setup (Inno Setup, src-tauri\installer\lumen.iss), drops the exe into dist\Lumen next
+# to the portable LumenData folder (models/chats are never touched) and the setup into
+# dist\Lumen-setup.exe. Mode "quick" skips the setup.
 param([string]$Mode = "run")
 # "Continue": native tools (cargo, rustup) write progress to stderr, which "Stop" would treat as fatal
 # in Windows PowerShell 5.1. Failures are detected through $LASTEXITCODE and explicit checks instead.
@@ -32,6 +33,13 @@ function Winget-Install($id, $extra) {
     & winget @wargs
     # winget returns non-zero for "already installed"; the checks below are what matter
     Refresh-Path
+}
+
+function Find-Iscc {
+    foreach ($p in "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") {
+        if (Test-Path $p) { return $p }
+    }
+    return $null
 }
 
 function Has-MsvcTools {
@@ -77,6 +85,19 @@ if (-not (Has-MsvcTools)) {
 }
 Ok "MSVC C++ Build Tools"
 
+$quick = $Mode -eq "quick"
+$iscc = $null
+if (-not $quick -and $Mode -ne "dev") {
+    $iscc = Find-Iscc
+    if (-not $iscc) {
+        # per-user install: no administrator rights needed
+        Winget-Install "JRSoftware.InnoSetup" @("--scope", "user")
+        $iscc = Find-Iscc
+        if (-not $iscc) { throw "Inno Setup install failed (needed for the Windows setup; 'run.bat quick' builds without it)" }
+    }
+    Ok "Inno Setup ($iscc)"
+}
+
 # ---- dependencies ----------------------------------------------------------
 Step "Installing npm packages"
 if (Test-Path "package-lock.json") { & npm ci --no-audit --no-fund } else { & npm install --no-audit --no-fund }
@@ -90,15 +111,8 @@ if ($Mode -eq "dev") {
 
 # ---- build -----------------------------------------------------------------
 $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-$quick = $Mode -eq "quick"
-if ($quick) {
-    Step "Building Lumen v$version (release, portable exe only)"
-    & npx tauri build --no-bundle
-} else {
-    # also builds the NSIS installer; the first run downloads the NSIS toolchain (~5 MB) into %LOCALAPPDATA%\tauri
-    Step "Building Lumen v$version (release exe + installer)"
-    & npx tauri build
-}
+Step "Building Lumen v$version (release exe)"
+& npx tauri build --no-bundle
 if ($LASTEXITCODE -ne 0) { throw "cargo/tauri build failed" }
 
 # ---- package ---------------------------------------------------------------
@@ -116,11 +130,10 @@ Copy-Item "src-tauri\target\release\lumen.exe" $exe -Force
 Ok "$exe"
 
 if (-not $quick) {
-    $setup = Get-ChildItem "src-tauri\target\release\bundle\nsis\Lumen_${version}_x64-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $setup) { throw "the installer was not produced (src-tauri\target\release\bundle\nsis)" }
-    $setupOut = Join-Path $root "dist\$($setup.Name)"
-    Copy-Item $setup.FullName $setupOut -Force
-    Ok "$setupOut  (installer: per-user, no admin rights, Start menu + optional desktop shortcut)"
+    Step "Building the Windows setup (Inno Setup)"
+    & $iscc /Qp "/DAppVersion=$version" "/DExe=$root\src-tauri\target\release\lumen.exe" "/O$root\dist" "$root\src-tauri\installer\lumen.iss"
+    if ($LASTEXITCODE -ne 0) { throw "the setup was not built (ISCC exit code $LASTEXITCODE)" }
+    Ok "$root\dist\Lumen-setup.exe  (per user, no admin rights, EN/RO, Start menu + optional desktop shortcut)"
 }
 
 if ($Mode -ne "build") {

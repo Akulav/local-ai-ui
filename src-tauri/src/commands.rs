@@ -29,6 +29,8 @@ pub fn get_state(app: AppHandle, state: S) -> Value {
         "runtime": runtime::installed_version(&state, &s.backend),
         "catalog": models::catalog(),
         "version": app.package_info().version.to_string(),
+        // windows | linux | macos: the UI shows the GPU backends this system has
+        "os": std::env::consts::OS,
         "updates": *state.updates.read(),
     })
 }
