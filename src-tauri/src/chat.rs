@@ -46,6 +46,17 @@ pub fn budget(state: &AppState, chat: &Chat) -> u32 {
     if chat.ctx_limit > 0 { chat.ctx_limit.min(n_ctx) } else { n_ctx }
 }
 
+/// Re-estimates what the chat occupies after its history changed outside a turn (a deleted
+/// exchange), stores it for the context meter and returns it.
+pub fn refresh_ctx_estimate(state: &AppState, chat_id: &str) -> Result<u32> {
+    let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat not found"))?;
+    let project = state.db.chat_project(&chat)?;
+    let msgs = build_messages(state, &chat, project.as_ref(), false)?;
+    let used = llm::estimate_tokens(&serde_json::to_string(&msgs)?);
+    state.db.set_chat_ctx(chat_id, used)?;
+    Ok(used)
+}
+
 pub fn system_prompt(state: &AppState, chat: &Chat, project: Option<&Project>, web: bool) -> String {
     let (lang, custom) = {
         let s = state.settings.read();
@@ -199,6 +210,9 @@ pub async fn send(app: AppHandle, opts: SendOpts) -> Result<()> {
     }
     state.generations.lock().remove(&chat.id);
     emit(&app, &chat.id, "busy", json!({"busy": false}));
+    if !cancel.load(Ordering::Relaxed) {
+        crate::reply_finished(&app);
+    }
     result
 }
 
@@ -297,8 +311,6 @@ pub fn gen_params(state: &AppState, think: bool) -> Value {
     })
 }
 
-/// Assistant loop: stream a reply; if it requested tools, execute them, store the results and ask
-/// again (max 24 rounds). Compresses mid-loop when long tool sessions approach the window.
 /// Conservative token estimate for context fitting (code tokenises denser than prose).
 fn est_tokens(chars: usize) -> u32 {
     (chars as f32 / 3.0).ceil() as u32
@@ -377,11 +389,32 @@ fn is_context_overflow(e: &anyhow::Error) -> bool {
     s.contains("context") && (s.contains("exceed") || s.contains("too long") || s.contains("size") || s.contains("n_ctx"))
 }
 
+/// Model rounds one user message may take (each round: a reply that may call tools).
+const MAX_ROUNDS: usize = 40;
+/// Rounds before the limit at which the model is told to wrap up.
+const WRAP_UP_AT: usize = 5;
+const _: () = assert!(WRAP_UP_AT < MAX_ROUNDS);
+
+/// Told to the model with the last tool results when few rounds are left.
+fn rounds_left_note(left: usize) -> String {
+    format!("\n\n[Lumen: {left} tool rounds left for this request. Stop exploring soon and give the user your answer.]")
+}
+
+/// The one-off instruction for the final round once all rounds are used (not stored in the chat).
+const ANSWER_NOW: &str = "[Lumen: you have used all the tool rounds for this request, so tools are switched off now. \
+Answer the user's request now from what you have found so far. Say briefly what you could not check yet, \
+so the user can ask you to continue.]";
+
+/// Assistant loop: stream a reply; if it requested tools, execute them, store the results and ask
+/// again (at most `MAX_ROUNDS`). Mid-loop it keeps long tool sessions inside the window. A turn always
+/// ends with an answer: when the rounds run out, a last round without tools makes the model reply
+/// (before, the loop just stopped after the last tool result - the user saw reasoning and no answer).
 async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, think: bool, web: bool, cancel: &AtomicBool) -> Result<()> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let defs = tools::definitions(project.is_some(), web);
     let ctx = ToolCtx { app, project, chat_id, cancel };
-    for _ in 0..40 {
+    let mut answered = false;
+    for round in 0..MAX_ROUNDS {
         let _ = fit_context(&state, chat_id, project, web, &defs, (0.72, 0.5, 4))?;
         let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?;
         let messages = build_messages(&state, &chat, project, web)?;
@@ -420,8 +453,11 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
             Err(e) => return Err(e),
         };
         if r.cancelled || r.tool_calls.is_empty() {
+            // (a reply with reasoning but no text and no tool calls is no answer either)
+            answered = r.cancelled || !r.content.trim().is_empty();
             break;
         }
+        let left = MAX_ROUNDS - round - 1;
         // room left for this round's results, shared between the calls
         let b = budget(&state, &state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?);
         let mut used = (r.prompt_tokens + r.completion_tokens).max(1);
@@ -434,7 +470,10 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
             let out = tools::run(&ctx, &tc.id, &tc.name, &tc.arguments).await;
             let free = (b as f32 * 0.8) as u32;
             let share = free.saturating_sub(used) / (n_calls - i as u32).max(1);
-            let content = clip_tool_output(&out.content, share.clamp(1500, 16_000));
+            let mut content = clip_tool_output(&out.content, share.clamp(1500, 16_000));
+            if left == WRAP_UP_AT && i + 1 == r.tool_calls.len() {
+                content.push_str(&rounds_left_note(left));
+            }
             used += est_tokens(content.len());
             let mut meta = json!({"tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments, "display": out.display, "ok": out.ok});
             if content.len() < out.content.len() {
@@ -450,7 +489,35 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
             compress(app, chat_id, cancel).await?;
         }
     }
+    if !answered && !cancel.load(Ordering::Relaxed) {
+        state.log(format!("[lumen] the turn ended without an answer (all {MAX_ROUNDS} rounds used, or no text): asking for it without tools"));
+        emit(app, chat_id, "notice", json!({"key": "answerNow"}));
+        let _ = fit_context(&state, chat_id, project, web, &defs, (0.72, 0.5, 4))?;
+        let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?;
+        let mut body = gen_params(&state, think);
+        body["messages"] = json!(final_round_messages(build_messages(&state, &chat, project, web)?));
+        // the same tool list keeps the prompt prefix (and llama-server's cache) of the earlier rounds;
+        // tool_choice "none" plus the note ask for text. (llama-server still parses a tool call the model
+        // writes anyway, so the result is checked below.)
+        if !defs.is_empty() {
+            body["tools"] = json!(defs);
+            body["tool_choice"] = json!("none");
+        }
+        let (_msg, r) = stream_assistant(app, chat_id, body, cancel, json!({"forced_answer": true})).await?;
+        if r.content.trim().is_empty() && !r.cancelled {
+            return Err(anyhow!(
+                "The model kept using tools instead of answering ({MAX_ROUNDS} rounds). Ask it to answer with what it has found so far, or to continue with a narrower part."
+            ));
+        }
+    }
     Ok(())
+}
+
+/// The request for the last round: the conversation plus the one-off "answer now" note (not stored,
+/// so later prompts stay byte-stable).
+fn final_round_messages(mut messages: Vec<Value>) -> Vec<Value> {
+    messages.push(json!({"role": "user", "content": ANSWER_NOW}));
+    messages
 }
 
 async fn make_title(app: &AppHandle, chat: &Chat) -> Result<()> {
@@ -655,6 +722,25 @@ mod tests {
         assert!(c.len() < 5200 && c.starts_with("line 0\n") && c.trim_end().ends_with("line 4999"));
         assert!(c.contains("cut to fit the context window"));
         assert_eq!(clip_tool_output("short", 1500), "short");
+    }
+
+    /// The field case: "check the project and see what features may be missing" used all 40 rounds
+    /// (85 tool calls) and the turn ended on a tool result with no answer. The last round now asks for
+    /// the answer with tools off, with a one-off note after the stored history.
+    #[test]
+    fn rounds_running_out_end_with_an_answer() {
+        let history = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "Hey, check the project and see what features may be missing"}),
+            json!({"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]}),
+            json!({"role": "tool", "tool_call_id": "c1", "content": "…"}),
+        ];
+        let req = final_round_messages(history.clone());
+        assert_eq!(req.len(), history.len() + 1);
+        assert_eq!(&req[..history.len()], &history[..], "the stored history is sent unchanged (prompt cache)");
+        assert_eq!(req.last().unwrap()["role"], "user", "a trailing system message breaks some chat templates");
+        assert!(req.last().unwrap()["content"].as_str().unwrap().contains("Answer the user's request now"));
+        assert!(rounds_left_note(WRAP_UP_AT).contains("5 tool rounds left"));
     }
 
     #[test]

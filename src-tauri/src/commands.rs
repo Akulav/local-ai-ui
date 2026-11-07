@@ -199,6 +199,22 @@ pub fn delete_chat(state: S, id: String) -> R<()> {
     state.db.delete_chat(&id).map_err(e)
 }
 
+/// Deletes one question and its whole answer (tool steps included). Returns the chat's new context
+/// estimate for the meter. Not while the chat is answering.
+#[tauri::command]
+pub fn delete_exchange(state: S, chat_id: String, message_id: String) -> R<u32> {
+    if state.generations.lock().contains_key(&chat_id) {
+        return Err("wait until the reply is finished (or stop it) before deleting messages".into());
+    }
+    let msgs = state.db.messages(&chat_id).map_err(e)?;
+    let m = msgs.iter().find(|m| m.id == message_id).ok_or("message not found")?;
+    if m.role != "user" {
+        return Err("only a question (with its answer) can be deleted".into());
+    }
+    state.db.delete_exchange(&chat_id, m.seq).map_err(e)?;
+    chat::refresh_ctx_estimate(&state, &chat_id).map_err(e)
+}
+
 #[tauri::command]
 pub fn send_message(app: AppHandle, chat_id: String, text: String, think: bool, web: bool, research: bool) {
     tauri::async_runtime::spawn(async move {

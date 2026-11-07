@@ -7,6 +7,8 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-07
+
 ### Added
 - Linux (x86-64) and macOS (Apple Silicon) versions, built automatically with Windows on every release. Linux: one
   program that installs itself (app menu entry); macOS: Lumen.app in a disk image. llama.cpp runs with Vulkan/ROCm/CPU
@@ -15,12 +17,21 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
   Existing installs (0.8 and earlier) are taken over in place; LumenData is kept.
 - Check for updates button in the sidebar and Settings, next to the Update button.
 - "Made by Akulav" on the welcome screen, in the setup, the exe and the macOS app.
+- Delete a chat from a project's page (trash button on each chat in the list).
+- Delete a single exchange: the trash button on your message removes it and Lumen's reply (with its tool steps),
+  without deleting the whole chat.
+- When a reply finishes while Lumen is in the background, the taskbar button flashes (Dock icon bounces on macOS);
+  when Lumen is hidden in the tray, the tray tooltip says a reply is ready.
 
 ### Changed
 - Releases build and publish all three systems with one checksum list; the release notes list the file per system.
 - README and CLAUDE.md rewritten for the new layout.
 
 ### Fixed
+- A long request ("check the project and see what features may be missing") could end with reasoning and tool calls
+  but no answer and no error: it used all 40 tool rounds, and the turn then just stopped. Now the model is told when
+  5 rounds are left, and if the rounds still run out it is asked once more, with tools off, to answer from what it
+  found (a reply with reasoning but no text gets the same). If even that gives no text, the chat says why.
 - "bad allocation" in long chats: llama-server copied whole conversations into its RAM prompt cache (up to 8 GB) and
   ran out of memory (RAM + page file). The cache is now sized from the free memory, and the error is explained.
 

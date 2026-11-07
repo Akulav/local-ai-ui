@@ -570,13 +570,28 @@ function userEl(m) {
   }
   if (m.meta?.research) n.querySelector(".bubble").insertAdjacentHTML("afterbegin", `<div style="font-size:11.5px;color:#aee6ff;display:flex;gap:5px;align-items:center;margin-bottom:4px">${icon("telescope")}${t("research")}</div>`);
   const tools = n.querySelector(".msg-tools");
-  tools.innerHTML = `<button data-a="copy">${icon("copy")}</button><button data-a="edit">${icon("edit")}${t("edit")}</button>`;
+  tools.innerHTML = `<button data-a="copy" title="${t("copy")}">${icon("copy")}</button><button data-a="edit">${icon("edit")}${t("edit")}</button><button data-a="del" title="${t("deleteExchange")}">${icon("trash")}</button>`;
   tools.onclick = (e) => {
     const a = e.target.closest("button")?.dataset.a;
     if (a === "copy") { navigator.clipboard.writeText(m.content); toast(t("copied")); }
     if (a === "edit") editUser(n, m);
+    if (a === "del") deleteExchange(m);
   };
   return n;
+}
+/** Deletes this question and its whole answer (tool steps included), then redraws the chat. */
+async function deleteExchange(m) {
+  if (S.busy[S.chatId]) return toast(t("waitForReply"), true);
+  if (!(await confirmBox(t("confirmDeleteExchange"), t("del")))) return;
+  S.ctxUsed = await call("delete_exchange", { chatId: S.chatId, messageId: m.id });
+  // drop the exchange locally: this message up to the next question
+  const i = S.messages.findIndex((x) => x.id === m.id);
+  let j = i + 1;
+  while (j < S.messages.length && S.messages[j].role !== "user") j++;
+  if (i >= 0) S.messages.splice(i, j - i);
+  S.liveCtxBase = S.ctxUsed;
+  renderChat();
+  updateCtxMeter();
 }
 function editUser(n, m) {
   if (S.busy[S.chatId]) return;
@@ -1265,7 +1280,10 @@ function renderProject() {
     <div class="kpis"><div class="kpi"><small>${t("indexed")}</small><b>${st.files}</b></div><div class="kpi"><small>${t("chunks")}</small><b>${st.chunks}</b></div><div class="kpi"><small>${t("embedded")}</small><b>${st.embedded}</b></div></div>
     <div id="projProg">${projProgressHtml()}</div>
     <h3>${icon("chat")}${t("projChats")}</h3><div class="list-box">`;
-  for (const c of projState.chats) html += `<div class="li" data-pchat="${c.id}" style="cursor:pointer">${icon("chat")}<span class="grow">${esc(c.title)}</span><small>${new Date(c.updated).toLocaleString()}</small></div>`;
+  for (const c of projState.chats) {
+    html += `<div class="li pchat" data-pchat="${c.id}" style="cursor:pointer">${icon("chat")}<span class="grow">${esc(c.title)}</span><small>${new Date(c.updated).toLocaleString()}</small>
+      <span class="li-acts"><button data-pdel="${c.id}" title="${t("del")}">${icon("trash")}</button></span></div>`;
+  }
   if (!projState.chats.length) html += `<div class="empty">${t("noChats")}</div>`;
   html += `</div><h3>${icon("book")}${t("instructions")}</h3><small style="color:var(--text-3)">${t("instructionsHint")}</small>
     <textarea class="inp" id="projInstr" style="margin-top:8px"></textarea><div style="margin-top:8px;display:flex;justify-content:flex-end"><button class="btn" id="saveInstr">${icon("check")}${t("saveShort")}</button></div>`;
@@ -1274,6 +1292,8 @@ function renderProject() {
   renderTopbar();
 }
 $("#projectPage").addEventListener("click", async (e) => {
+  const del = e.target.closest("[data-pdel]");
+  if (del) return deleteChat(del.dataset.pdel);
   const c = e.target.closest("[data-pchat]");
   if (c) return openChat(c.dataset.pchat);
   const id = e.target.closest("button, #openFolder")?.id;

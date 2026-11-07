@@ -315,6 +315,24 @@ impl Db {
         Ok(())
     }
 
+    /// Deletes one exchange: the user message at `seq` and everything that answered it (assistant
+    /// replies, tool calls and results, progress cards) up to the next user message. Tool calls and
+    /// their results always go together, so the remaining history stays valid for the chat template.
+    /// Returns how many messages were removed.
+    pub fn delete_exchange(&self, chat_id: &str, seq: i64) -> Result<usize> {
+        let c = self.0.lock();
+        let next: Option<i64> = c.query_row(
+            "SELECT MIN(seq) FROM messages WHERE chat_id=?1 AND seq>?2 AND role='user'",
+            params![chat_id, seq],
+            |r| r.get(0),
+        )?;
+        let n = c.execute(
+            "DELETE FROM messages WHERE chat_id=?1 AND seq>=?2 AND seq<?3",
+            params![chat_id, seq, next.unwrap_or(i64::MAX)],
+        )?;
+        Ok(n)
+    }
+
     // ---------- stats ----------
     pub fn add_stat(&self, model: &str, tps: f64, tokens: u32) -> Result<()> {
         self.0.lock().execute(
@@ -340,6 +358,32 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_an_exchange_takes_its_whole_answer() {
+        let dir = std::env::temp_dir().join(format!("lumen-db-test-{}", crate::state::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        let chat = db.create_chat(None, "t").unwrap();
+        let add = |role: &str, text: &str| db.add_message(&chat.id, role, text, "", &serde_json::json!({})).unwrap();
+        add("user", "q1");
+        add("assistant", "a1");
+        let q2 = add("user", "q2");
+        add("assistant", ""); // a reply that called tools
+        add("tool", "file text");
+        add("event", "");
+        add("assistant", "a2");
+        let q3 = add("user", "q3");
+        add("assistant", "a3");
+        assert_eq!(db.delete_exchange(&chat.id, q2.seq).unwrap(), 5, "q2, its tool round, the card and a2");
+        let left: Vec<String> = db.messages(&chat.id).unwrap().iter().map(|m| m.content.clone()).collect();
+        assert_eq!(left, ["q1", "a1", "q3", "a3"]);
+        // the last exchange: everything to the end
+        assert_eq!(db.delete_exchange(&chat.id, q3.seq).unwrap(), 2);
+        assert_eq!(db.messages(&chat.id).unwrap().len(), 2);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn chat_moves_into_and_out_of_a_project() {

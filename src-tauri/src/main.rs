@@ -52,6 +52,7 @@ fn tray_text(lang: &str, key: &str) -> &'static str {
         "quit" => if ro { "Închide Lumen" } else { "Quit Lumen" },
         "app_update" => if ro { "Actualizează Lumen la v" } else { "Update Lumen to v" },
         "rt_update" => if ro { "Actualizează llama.cpp la " } else { "Update llama.cpp to " },
+        "reply_ready" => if ro { "Lumen – un răspuns este gata" } else { "Lumen – a reply is ready" },
         _ => "",
     }
 }
@@ -92,6 +93,24 @@ fn show_main(app: &AppHandle) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+    }
+    // (clears a "reply is ready" tooltip)
+    let updates = app.state::<Arc<AppState>>().updates.read().clone();
+    refresh_tray(app, &updates);
+}
+
+/// A reply finished. If Lumen is in the background, make that noticeable: the taskbar button flashes
+/// (Dock icon bounces on macOS, urgency hint on Linux) until the window is focused; when the window is
+/// hidden in the tray, the tray tooltip says a reply is ready until it is opened again.
+pub fn reply_finished(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    if !w.is_visible().unwrap_or(true) {
+        if let Some(tray) = app.tray_by_id(TRAY_ID) {
+            let lang = app.state::<Arc<AppState>>().settings.read().ui_lang.clone();
+            let _ = tray.set_tooltip(Some(tray_text(&lang, "reply_ready")));
+        }
+    } else if !w.is_focused().unwrap_or(true) {
+        let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
     }
 }
 
@@ -148,6 +167,7 @@ fn main() {
             commands::set_chat_limit,
             commands::set_chat_project,
             commands::delete_chat,
+            commands::delete_exchange,
             commands::send_message,
             commands::stop_generation,
             commands::regenerate,
