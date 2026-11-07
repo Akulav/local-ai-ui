@@ -400,11 +400,15 @@ async function modelMenu(anchor) {
   html += `<button data-v="manage">${icon("layers")}${t("models")}…</button>`;
   popMenu(anchor, html, (v) => {
     if (v === "manage") return showView("models");
-    if (v === "unload") return call("unload_model");
+    if (v === "unload") return unloadModel();
     if (v.startsWith("load:")) loadModel(v.slice(5));
   });
 }
-function loadModel(file) {
+async function unloadModel() {
+  if (await confirmStopReplies()) call("unload_model");
+}
+async function loadModel(file) {
+  if (!(await confirmStopReplies())) return;
   S.needsReload = false;
   call("load_model", { file }).then(() => toast(`${shortModel(file)} · ${t("ready")}`)).catch(() => {});
 }
@@ -480,7 +484,27 @@ async function openChat(id) {
   S.chatId = id; S.chat = r.chat; S.messages = r.messages; S.budget = r.budget; S.ctxUsed = r.chat.ctx_used;
   S.busy[id] = r.busy; S.live = null; S.showOld = false;
   showView("chat");
+  if (r.busy && r.live) resumeLive(r.live);
   scrollBottom(true);
+}
+/** A reply kept running while you were elsewhere: show what it has written so far and keep
+ *  streaming into it (the next deltas carry the same temp_id), or the tool it is running. */
+function resumeLive(l) {
+  if (l.temp_id) {
+    startLive(l.temp_id);
+    if (l.reasoning || l.content) liveDelta({ temp_id: l.temp_id, reasoning: l.reasoning, content: l.content });
+    if (l.tokens) liveProgress({ temp_id: l.temp_id, tokens: l.tokens, tps: l.tps || 0 });
+    flushLive();
+  } else if (l.tool) {
+    currentTurn(true).querySelector(".turn-body").appendChild(runningToolEl(l.tool.id, l.tool.name, l.tool.arguments));
+  }
+  renderComposer();
+  markLastTurn();
+}
+/** Loading another model or unloading restarts the engine, which ends running replies: ask first. */
+async function confirmStopReplies() {
+  if (!Object.values(S.busy).some(Boolean)) return true;
+  return confirmBox(t("confirmStopReplies"), t("continue"));
 }
 /** Rebuilds the whole thread. Consecutive assistant/tool messages are grouped into one "turn"
  *  (avatar + body); compressed messages are hidden behind a toggle. */
@@ -1127,7 +1151,7 @@ $("#modelsPage").addEventListener("click", async (e) => {
   const b = e.target.closest("button, .li[data-repo]");
   if (!b) return;
   if (b.dataset.load) return loadModel(b.dataset.load);
-  if (b.hasAttribute("data-unload")) return call("unload_model");
+  if (b.hasAttribute("data-unload")) return unloadModel();
   if (b.dataset.del) {
     if (!(await confirmBox(t("confirmDelete", { x: b.dataset.del }), t("del")))) return;
     await call("delete_model", { file: b.dataset.del }); return refreshModels();
@@ -1509,9 +1533,17 @@ document.addEventListener("keydown", (e) => {
     if (openMenuEl) return closeMenu();
     if (closeTopModal()) return;
     if (S.engineOpen) { S.engineOpen = false; return renderStatus(); }
-    if (S.busy[S.chatId]) call("stop_generation", { chatId: S.chatId });
+    // stop the reply only when you are looking at that chat and not cancelling something else
+    // (a rename, a message edit, a field on another page): Esc there used to stop the AI too
+    if (S.busy[S.chatId] && escStopsReply(e)) call("stop_generation", { chatId: S.chatId });
   }
 });
+function escStopsReply(e) {
+  if (S.view !== "chat") return false;
+  const el = e.target;
+  const typing = el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+  return !typing || el.id === "input";
+}
 
 // ---------------------------------------------------------------- boot
 (async function boot() {

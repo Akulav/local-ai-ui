@@ -164,11 +164,15 @@ pub fn get_chat(state: S, id: String) -> R<Value> {
     let messages = state.db.messages(&id).map_err(e)?;
     let budget = chat::budget(&state, &chat);
     let busy = state.generations.lock().contains_key(&id);
-    Ok(json!({"chat": chat, "messages": messages, "budget": budget, "busy": busy}))
+    // a reply still being written (or a tool running): the window shows it live again
+    let live = if busy { state.live.lock().get(&id).cloned() } else { None };
+    Ok(json!({"chat": chat, "messages": messages, "budget": budget, "busy": busy, "live": live}))
 }
 
 #[tauri::command]
 pub fn rename_chat(state: S, id: String, title: String) -> R<()> {
+    // your own name wins over the model's title that may still come after a running reply
+    state.provisional_titles.lock().remove(&id);
     state.db.rename_chat(&id, title.trim()).map_err(e)
 }
 

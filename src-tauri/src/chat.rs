@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::db::{Chat, Message, Project};
 use crate::llm::{self, Delta, StreamResult};
 use crate::prompts;
-use crate::state::{AppState, DEFAULT_TITLES};
+use crate::state::{AppState, LiveReply, DEFAULT_TITLES};
 use crate::tools::{self, ToolCtx};
 
 pub fn emit(app: &AppHandle, chat_id: &str, kind: &str, mut payload: Value) {
@@ -189,6 +189,15 @@ pub async fn send(app: AppHandle, opts: SendOpts) -> Result<()> {
         }
         let user = state.db.add_message(&chat.id, "user", &opts.text, "", &meta)?;
         emit(&app, &chat.id, "message", json!({"message": user}));
+        // a name right away (long project turns used to leave "New chat" until the very end, or for
+        // good when the turn was stopped); the model's title replaces it when the reply is done
+        if DEFAULT_TITLES.contains(&fresh.title.as_str()) {
+            if let Some(t) = quick_title(&opts.text) {
+                state.db.rename_chat(&chat.id, &t)?;
+                state.provisional_titles.lock().insert(chat.id.clone());
+                emit(&app, &chat.id, "title", json!({"title": t}));
+            }
+        }
 
         if opts.research {
             crate::research::run(&app, &chat.id, &opts.text, opts.think, &cancel).await?;
@@ -205,7 +214,8 @@ pub async fn send(app: AppHandle, opts: SendOpts) -> Result<()> {
     // follow-ups: title + compression (only if not cancelled)
     if !cancel.load(Ordering::Relaxed) {
         if let Ok(Some(c)) = state.db.chat(&chat.id) {
-            if DEFAULT_TITLES.contains(&c.title.as_str()) {
+            let provisional = state.provisional_titles.lock().remove(&chat.id);
+            if provisional || DEFAULT_TITLES.contains(&c.title.as_str()) {
                 let _ = make_title(&app, &c).await;
             }
             let c = state.db.chat(&chat.id)?.unwrap_or(c);
@@ -216,11 +226,50 @@ pub async fn send(app: AppHandle, opts: SendOpts) -> Result<()> {
         }
     }
     state.generations.lock().remove(&chat.id);
+    state.live.lock().remove(&chat.id);
+    state.provisional_titles.lock().remove(&chat.id);
     emit(&app, &chat.id, "busy", json!({"busy": false}));
     if !cancel.load(Ordering::Relaxed) {
         crate::reply_finished(&app);
     }
     result
+}
+
+/// A name for a chat from its first message, set the moment it is sent (the model's title replaces it
+/// when the reply is done): the first line without links, Markdown and greetings, at most ~48 chars.
+pub fn quick_title(text: &str) -> Option<String> {
+    static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let link = LINK.get_or_init(|| regex::Regex::new(r"(?i)https?://\S+").expect("link regex"));
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = link.replace_all(line, "");
+    let mut s: String = line.chars().filter(|c| !matches!(c, '#' | '*' | '`' | '>' | '_')).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
+    // greetings and politeness carry no topic
+    const FILLER: &[&str] = &[
+        "hey", "hi", "hello", "please", "pls", "so", "ok", "okay", "can you", "could you", "would you", "i want you to",
+        "i need you to", "salut", "bună", "buna", "te rog", "poți să", "poti sa", "vreau să", "vreau sa",
+    ];
+    loop {
+        let lower = s.to_lowercase();
+        let Some(f) = FILLER.iter().find(|f| lower.starts_with(*f) && lower[f.len()..].starts_with([' ', ',', '!', '.', ':'])) else { break };
+        // (checked slice: lowercasing can change a character's byte length)
+        let Some(rest) = s.get(f.len()..) else { break };
+        s = rest.trim_start_matches([' ', ',', '!', '.', ':']).to_string();
+    }
+    let s = s.trim().trim_end_matches(['?', '.', '!', ':', ',']).trim().to_string();
+    if s.chars().count() < 3 {
+        return None;
+    }
+    let mut t = if s.chars().count() <= 48 {
+        s
+    } else {
+        let cut: String = s.chars().take(48).collect();
+        let at = cut.rfind(' ').filter(|&i| i > 20).unwrap_or(cut.len());
+        format!("{}…", cut[..at].trim_end_matches([',', ';', ':', ' ']))
+    };
+    if let Some(first) = t.chars().next() {
+        t = first.to_uppercase().collect::<String>() + &t[first.len_utf8()..];
+    }
+    Some(t)
 }
 
 pub async fn regenerate(app: AppHandle, chat_id: String, think: bool, web: bool) -> Result<()> {
@@ -243,20 +292,35 @@ pub async fn stream_assistant(
 ) -> Result<(Message, StreamResult)> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let temp_id = crate::state::new_id();
+    state.live.lock().insert(chat_id.to_string(), LiveReply { temp_id: temp_id.clone(), ..Default::default() });
     emit(app, chat_id, "assistant_start", json!({"temp_id": temp_id}));
     let started = Instant::now();
     let mut pend_c = String::new();
     let mut pend_r = String::new();
     let mut last_flush = Instant::now();
+    // the UI gets deltas; the snapshot (`state.live`) gets the same text, for a chat opened mid-reply
+    let flush = |c: &str, r: &str| {
+        if let Some(l) = state.live.lock().get_mut(chat_id) {
+            l.content.push_str(c);
+            l.reasoning.push_str(r);
+        }
+        emit(app, chat_id, "delta", json!({"temp_id": temp_id, "content": c, "reasoning": r}));
+    };
     let r = llm::stream_chat(&state, body, cancel, |d| {
         match d {
             Delta::Content(s) => pend_c.push_str(s),
             Delta::Reasoning(s) => pend_r.push_str(s),
             Delta::Tool { index, name } => emit(app, chat_id, "tool_pending", json!({"temp_id": temp_id, "index": index, "name": name})),
-            Delta::Progress { tps, tokens } => emit(app, chat_id, "progress", json!({"temp_id": temp_id, "tps": tps, "tokens": tokens})),
+            Delta::Progress { tps, tokens } => {
+                if let Some(l) = state.live.lock().get_mut(chat_id) {
+                    l.tps = tps;
+                    l.tokens = tokens;
+                }
+                emit(app, chat_id, "progress", json!({"temp_id": temp_id, "tps": tps, "tokens": tokens}))
+            }
         }
         if last_flush.elapsed().as_millis() >= 33 && (!pend_c.is_empty() || !pend_r.is_empty()) {
-            emit(app, chat_id, "delta", json!({"temp_id": temp_id, "content": pend_c, "reasoning": pend_r}));
+            flush(&pend_c, &pend_r);
             pend_c.clear();
             pend_r.clear();
             last_flush = Instant::now();
@@ -264,8 +328,9 @@ pub async fn stream_assistant(
     })
     .await;
     if !pend_c.is_empty() || !pend_r.is_empty() {
-        emit(app, chat_id, "delta", json!({"temp_id": temp_id, "content": pend_c, "reasoning": pend_r}));
+        flush(&pend_c, &pend_r);
     }
+    state.live.lock().remove(chat_id);
     let r = match r {
         Ok(r) => r,
         Err(e) => {
@@ -479,7 +544,9 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            emit(app, chat_id, "tool_start", json!({"id": tc.id, "name": tc.name, "arguments": tc.arguments}));
+            let running = json!({"id": tc.id, "name": tc.name, "arguments": tc.arguments});
+            state.live.lock().insert(chat_id.to_string(), LiveReply { tool: Some(running.clone()), ..Default::default() });
+            emit(app, chat_id, "tool_start", running);
             let out = tools::run(&ctx, &tc.id, &tc.name, &tc.arguments).await;
             let free = (b as f32 * 0.8) as u32;
             let share = free.saturating_sub(used) / (n_calls - i as u32).max(1);
@@ -494,6 +561,7 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
                 meta["clipped"] = json!(true);
             }
             let m = state.db.add_message(chat_id, "tool", &content, "", &meta)?;
+            state.live.lock().remove(chat_id);
             emit(app, chat_id, "message", json!({"message": m}));
         }
         // compress mid-loop if long tool sessions approach the limit
@@ -754,6 +822,22 @@ mod tests {
         assert_eq!(req.last().unwrap()["role"], "user", "a trailing system message breaks some chat templates");
         assert!(req.last().unwrap()["content"].as_str().unwrap().contains("Answer the user's request now"));
         assert!(rounds_left_note(WRAP_UP_AT).contains("5 tool rounds left"));
+    }
+
+    /// Real first messages from the field: each chat gets a readable name the moment it is sent.
+    #[test]
+    fn first_messages_make_names() {
+        assert_eq!(quick_title("Develop what is written inside the TODO.txt").as_deref(), Some("Develop what is written inside the TODO.txt"));
+        assert_eq!(
+            quick_title("Hey, check the project and see what features may be missing").as_deref(),
+            Some("Check the project and see what features may be…")
+        );
+        assert_eq!(quick_title("can you look at https://github.com/x/y and port it?").as_deref(), Some("Look at and port it"));
+        assert_eq!(quick_title("Salut, te rog explică-mi cum funcționează un transformer").as_deref(), Some("Explică-mi cum funcționează un transformer"));
+        assert_eq!(quick_title("## Plan\nsecond line").as_deref(), Some("Plan"));
+        assert_eq!(quick_title("hi"), None, "no topic: the model's title comes after the reply");
+        assert_eq!(quick_title("   \n  "), None);
+        assert!(quick_title(&"word ".repeat(40)).unwrap().chars().count() <= 49);
     }
 
     #[test]

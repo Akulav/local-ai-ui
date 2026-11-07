@@ -7,6 +7,20 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-07
+
+### Added
+- A new chat gets a name the moment you send its first message (from your words); the model's own title replaces it
+  when the reply is done. Long project tasks no longer sit as "New chat", and a stopped turn keeps its name.
+  Renaming the chat yourself always wins.
+
+### Fixed
+- Going to another chat or page while Lumen is writing no longer looks like it stopped: the reply keeps running, and
+  when you come back the chat shows what it has written so far (or the tool it is running) and keeps streaming.
+- Esc stopped the reply even when you were on Settings or Models, renaming a chat or editing a message. It now stops
+  it only in the chat view, when you're not typing elsewhere.
+- Loading another model or unloading while a reply is running now asks first (it restarts the engine).
+
 ## [0.10.0] - 2026-11-07
 
 ### Added

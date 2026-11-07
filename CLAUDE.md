@@ -150,6 +150,12 @@ tool_progress (audit_code batches), assistant_done, assistant_failed, compress_p
   under them (a GitHub repo link also covers its raw.githubusercontent.com files). Web on: any page.
 - Tool loop (`chat::run_turn`): at most `MAX_ROUNDS`; warned at `WRAP_UP_AT` rounds left; if they run out (or a reply has
   no text) a last round with `tool_choice: "none"` asks for the answer. A turn must never end silently.
+- Replies keep running when the user leaves a chat. `state.live` holds each running reply's text/reasoning/tokens (or
+  its running tool); `get_chat` returns it as `live` and the UI's `resumeLive` re-attaches (same `temp_id`). Clear it
+  when a stream or tool ends. Only Stop, Esc in the chat view, deleting the chat, unload/switch (UI asks first) and
+  quit end a reply.
+- Chat names: `chat::quick_title` names a default-titled chat from its first message at send time
+  (`state.provisional_titles`); `make_title` replaces it after the reply unless the user renamed it.
 - Unload / model switch / quit call `chat::stop_all` first: a reply whose server vanished after a stop is a stop, not a
   crash (`recover` would otherwise restart the model the user just unloaded).
 - Idle auto-unload (`settings.idle_unload_min`, metrics.rs `check_idle`): anything using the chat model registers in

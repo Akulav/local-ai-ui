@@ -162,6 +162,20 @@ pub struct LlmInfo {
     pub loaded_at: i64,
 }
 
+/// The reply being written in a chat (or the tool it is running): sent with `get_chat` so the window
+/// can pick the reply up live after you were in another chat or page.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct LiveReply {
+    /// the id of the streaming message (the `chat-event`s that follow carry it)
+    pub temp_id: String,
+    pub content: String,
+    pub reasoning: String,
+    pub tokens: u32,
+    pub tps: f64,
+    /// a tool being run between two replies: {id, name, arguments}
+    pub tool: Option<serde_json::Value>,
+}
+
 pub struct AppState {
     pub paths: Paths,
     pub db: Db,
@@ -171,6 +185,10 @@ pub struct AppState {
     pub info: RwLock<LlmInfo>,
     pub downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub generations: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// What a running reply has produced so far, per chat: a chat opened mid-reply shows it live.
+    pub live: Mutex<HashMap<String, LiveReply>>,
+    /// Chats named from their first message, waiting for the model's title after the reply.
+    pub provisional_titles: Mutex<std::collections::HashSet<String>>,
     pub indexes: Mutex<HashMap<String, Arc<ProjectIndex>>>,
     pub indexing: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub http: reqwest::Client,
@@ -209,6 +227,8 @@ impl AppState {
             info: RwLock::new(LlmInfo { state: "stopped".into(), ..Default::default() }),
             downloads: Mutex::new(HashMap::new()),
             generations: Mutex::new(HashMap::new()),
+            live: Mutex::new(HashMap::new()),
+            provisional_titles: Mutex::new(Default::default()),
             indexes: Mutex::new(HashMap::new()),
             indexing: Mutex::new(HashMap::new()),
             http,
