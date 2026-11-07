@@ -145,6 +145,13 @@ tool_progress (audit_code batches), assistant_done, assistant_failed, compress_p
 - Web search uses official APIs only – no HTML scraping of search engines, no bot-check tricks. Wikipedia and
   DuckDuckGo get the honest `Lumen/<version>` User-Agent. Default provider: DuckDuckGo's keyless Instant Answer API
   topped up with Wikipedia (no full-web results; `html.duckduckgo.com` is off limits).
+- Links with Web off: `fetch_url` is always in the tool list (stable prompt) but `tools::link_allowed` only opens links
+  that appear in the user's messages or project-file tool results (not fetched pages / search results), and pages
+  under them (a GitHub repo link also covers its raw.githubusercontent.com files). Web on: any page.
+- Tool loop (`chat::run_turn`): at most `MAX_ROUNDS`; warned at `WRAP_UP_AT` rounds left; if they run out (or a reply has
+  no text) a last round with `tool_choice: "none"` asks for the answer. A turn must never end silently.
+- Unload / model switch / quit call `chat::stop_all` first: a reply whose server vanished after a stop is a stop, not a
+  crash (`recover` would otherwise restart the model the user just unloaded).
 - Idle auto-unload (`settings.idle_unload_min`, metrics.rs `check_idle`): anything using the chat model registers in
   `state.generations` or calls `state.touch()`.
 - All user-facing strings go in `ui/i18n.js` in both `en` and `ro`; the tray's few labels are in main.rs `tray_text`.

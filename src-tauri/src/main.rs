@@ -118,9 +118,7 @@ pub fn reply_finished(app: &AppHandle) {
 pub async fn shutdown(app: &AppHandle) {
     let state = app.state::<Arc<AppState>>();
     state.quitting.store(true, Ordering::Relaxed);
-    for c in state.generations.lock().values() {
-        c.store(true, Ordering::Relaxed);
-    }
+    chat::stop_all(&state);
     server::stop_all(app).await;
 }
 
@@ -213,6 +211,7 @@ fn main() {
                         let _ = app.emit("update-prompt", json!({ "kind": id }));
                     }
                     "unload" => {
+                        chat::stop_all(&app.state::<Arc<AppState>>());
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move { server::stop_llm(&app).await });
                     }

@@ -47,6 +47,11 @@ pub const WEB_TOOLS: &str = r#"
 # Web access
 You can call `web_search` and `fetch_url` when the question needs current or niche information. Cite the sources you used as Markdown links. Do not search for things you already know well."#;
 
+/// With Web off: the model may still read links the user gave (tools.rs `link_allowed`).
+pub const LINKS_ONLY: &str = r#"
+# Links
+Web search is off. You can still read a link that appears in this conversation - in the user's messages or in a project file you read - with `fetch_url`, and pages under it (for a GitHub repository also its raw files at raw.githubusercontent.com). Read such a link when the request depends on it instead of guessing what it contains. Other addresses are refused; if you need more of the web, say so and the user can turn on Web."#;
+
 pub fn project(name: &str, folder: &str, tree: &str, instructions: &str) -> String {
     let custom = if instructions.trim().is_empty() {
         String::new()

@@ -168,7 +168,8 @@ switch and delete at any time; the last model loads at start (optional). Small m
 ## 🔒 Privacy and safety
 
 - Chats, files, models and telemetry stay on your computer. Lumen talks to the internet only to download the engine
-  and models, to check for updates on GitHub, and (when you turn Web on) to search through official APIs.
+  and models, to check for updates on GitHub, to read a link you gave it (in your message or in a project file it
+  read, and pages under that link), and - when you turn Web on - to search through official APIs and read any page.
 - File tools are sandboxed to the project folder; every write keeps a backup so the diff card can undo it.
 - Commands (`run_command`) and git only run after you allow them in the chat.
 - Updates install only files whose SHA-256 matches the release's `SHA256SUMS.txt`, from this repository's releases.

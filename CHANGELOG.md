@@ -7,6 +7,20 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-07
+
+### Added
+- Lumen can read links you give it even with Web off: a link in your message, or in a project file it read (e.g. a
+  TODO that points to a GitHub repository), and pages under that link (for a GitHub repository also its raw files).
+  Web search and other addresses still need Web on. Before, the model said it couldn't open the link.
+
+### Fixed
+- Unloading or switching the model while a reply was being written made Lumen think llama-server had crashed: it
+  restarted the model you had just unloaded and the reply was lost without a word. Unload, switch and quit now stop
+  the reply first.
+- A page that needs a login (a private GitHub repository answers 404) now says so to the model, instead of a bare
+  "HTTP 404".
+
 ## [0.9.0] - 2026-11-07
 
 ### Added

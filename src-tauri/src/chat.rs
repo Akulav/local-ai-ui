@@ -65,9 +65,7 @@ pub fn system_prompt(state: &AppState, chat: &Chat, project: Option<&Project>, w
     let mut sys = prompts::base(&lang, &today());
     sys.push_str(&prompts::custom_instructions(&custom));
     sys.push_str(prompts::GENERAL_TOOLS);
-    if web {
-        sys.push_str(prompts::WEB_TOOLS);
-    }
+    sys.push_str(if web { prompts::WEB_TOOLS } else { prompts::LINKS_ONLY });
     if let Some(p) = project {
         let tree = tools::tree(Path::new(&p.folder), "", 3, 220);
         sys.push_str(&prompts::project(&p.name, &p.folder, &tree, &p.instructions));
@@ -137,6 +135,15 @@ fn register_cancel(state: &AppState, chat_id: &str) -> Arc<AtomicBool> {
 
 pub fn stop(state: &AppState, chat_id: &str) {
     if let Some(c) = state.generations.lock().get(chat_id) {
+        c.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Stops every running reply. Called before the user unloads or switches the model (and at quit):
+/// the reply then ends as stopped instead of looking like a crash, which used to restart the model
+/// the user had just unloaded.
+pub fn stop_all(state: &AppState) {
+    for c in state.generations.lock().values() {
         c.store(true, Ordering::Relaxed);
     }
 }
@@ -412,7 +419,7 @@ so the user can ask you to continue.]";
 async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, think: bool, web: bool, cancel: &AtomicBool) -> Result<()> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let defs = tools::definitions(project.is_some(), web);
-    let ctx = ToolCtx { app, project, chat_id, cancel };
+    let ctx = ToolCtx { app, project, chat_id, cancel, web };
     let mut answered = false;
     for round in 0..MAX_ROUNDS {
         let _ = fit_context(&state, chat_id, project, web, &defs, (0.72, 0.5, 4))?;
@@ -425,6 +432,12 @@ async fn run_turn(app: &AppHandle, chat_id: &str, project: Option<&Project>, thi
         }
         let (_msg, r) = match stream_assistant(app, chat_id, body.clone(), cancel, json!({})).await {
             Ok(x) => x,
+            // stopped (Stop, unload, model switch, quit): the server may be gone already, so the request
+            // fails before it sees the stop - that's the stop, not a crash to recover from
+            Err(e) if cancel.load(Ordering::Relaxed) => {
+                state.log(format!("[lumen] reply stopped ({e})"));
+                break;
+            }
             Err(e) if is_context_overflow(&e) => {
                 // the estimate was off: drop everything but the latest tool result, summarise the earlier
                 // turns too (long conversations overflow without any tool output), and try once more

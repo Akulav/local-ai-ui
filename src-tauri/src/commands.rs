@@ -75,11 +75,14 @@ pub async fn search_hf(state: S<'_>, query: String) -> R<Value> {
 
 #[tauri::command]
 pub async fn load_model(app: AppHandle, file: String) -> R<()> {
+    // switching models ends running replies (they are stopped, not mistaken for a crash)
+    chat::stop_all(&app.state::<Arc<AppState>>());
     server::start_llm(&app, &file).await.map_err(e)
 }
 
 #[tauri::command]
 pub async fn unload_model(app: AppHandle) {
+    chat::stop_all(&app.state::<Arc<AppState>>());
     server::stop_llm(&app).await;
 }
 

@@ -16,6 +16,8 @@ pub struct ToolCtx<'a> {
     pub project: Option<&'a Project>,
     pub chat_id: &'a str,
     pub cancel: &'a AtomicBool,
+    /// the Web toggle: off, `fetch_url` only opens links that appear in the conversation
+    pub web: bool,
 }
 
 pub struct ToolOutput {
@@ -185,8 +187,76 @@ pub fn definitions(project: bool, web: bool) -> Vec<Value> {
             "Fetch a web page (or PDF) and return its readable text.",
             json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
         ));
+    } else {
+        // (always listed, so the prompt stays the same whether or not a link has appeared yet)
+        v.push(func(
+            "fetch_url",
+            "Read a web page (or PDF) whose link appears in this conversation - in the user's messages or in a project file you read - or a page under such a link (for a GitHub repository also its raw files). Returns the readable text. Web search is off: other addresses are refused.",
+            json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
+        ));
     }
     v
+}
+
+/// http(s) links in a text (Markdown and quotes around them are not part of the link).
+pub fn extract_links(text: &str) -> Vec<String> {
+    static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = LINK.get_or_init(|| regex::Regex::new(r#"(?i)\bhttps?://[^\s<>"'`()\[\]{}|\\^]+"#).expect("link regex"));
+    re.find_iter(text)
+        .map(|m| m.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '_']).to_string())
+        .filter(|l| l.len() > "https://x".len())
+        .collect()
+}
+
+/// Links the user gave in this chat: in their messages, and in project files the model read. Links
+/// on fetched pages and search results don't count, so with Web off the model can't crawl outward.
+fn conversation_links(state: &AppState, chat_id: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for m in state.db.messages(chat_id)? {
+        let from_web = matches!(m.meta["name"].as_str(), Some("fetch_url" | "web_search"));
+        if m.role == "user" || (m.role == "tool" && !from_web) {
+            out.extend(extract_links(&m.content));
+            // (a clipped or pruned tool result keeps its full text in meta)
+            if let Some(full) = m.meta["full"].as_str() {
+                out.extend(extract_links(full));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// "https://www.GitHub.com/a/b/#x" -> "github.com/a/b": scheme, www., fragment and trailing / don't matter.
+fn norm_link(url: &str) -> String {
+    let s = url.trim();
+    let s = s.split('#').next().unwrap_or(s);
+    let s = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
+    let (host, path) = s.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((s, String::new()));
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    format!("{host}{}", path.trim_end_matches('/'))
+}
+
+/// May `url` be opened with Web off? It must be one of `links` or lie under one (same host, the path
+/// continues after a `/`, `?` or the end). A GitHub repository link also covers its raw files.
+pub fn link_allowed(url: &str, links: &[String]) -> bool {
+    let u = norm_link(url);
+    let under = |base: &str| u == base || u.strip_prefix(base).is_some_and(|rest| rest.starts_with('/') || rest.starts_with('?'));
+    links.iter().any(|l| {
+        let base = norm_link(l);
+        if under(&base) {
+            return true;
+        }
+        // github.com/<owner>/<repo>/… -> raw.githubusercontent.com/<owner>/<repo>/…
+        let mut parts = base.splitn(4, '/');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("github.com"), Some(owner), Some(repo)) if !owner.is_empty() && !repo.is_empty() => {
+                under(&format!("raw.githubusercontent.com/{owner}/{repo}"))
+            }
+            _ => false,
+        }
+    })
 }
 
 /// Resolve a model-provided path inside the project folder, rejecting escapes.
@@ -495,6 +565,11 @@ async fn run_inner(ctx: &ToolCtx<'_>, call_id: &str, name: &str, a: &Value) -> R
         }
         "fetch_url" => {
             let url = s(a, "url")?;
+            if !ctx.web && !link_allowed(url, &conversation_links(&state, ctx.chat_id)?) {
+                return Err(anyhow!(
+                    "`{url}` does not appear in this conversation. With Web off, only links from the user's messages or the project files you read (and pages under them) can be opened. Ask the user to turn on Web if you need more."
+                ));
+            }
             let page = crate::web::fetch(&state, url).await?;
             let text: String = page.text.chars().take(24_000).collect();
             Ok(ToolOutput {
@@ -504,5 +579,70 @@ async fn run_inner(ctx: &ToolCtx<'_>, call_id: &str, name: &str, a: &Value) -> R
             })
         }
         other => Err(anyhow!("unknown tool `{other}`")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The field case: "Develop what is written inside the TODO.txt", whose lines link the reference repo.
+    #[test]
+    fn links_in_a_file_are_found() {
+        let todo = "Make setup, update work just like https://github.com/Akulav/ai-girlfriend with inno setup installer.\n\
+                    Structure the readme in similar way as https://github.com/Akulav/ai-girlfriend\n\
+                    See [the docs](https://example.org/a/b?x=1). Or <https://example.net/>, \"http://lan.local:8080/p\".";
+        let links = extract_links(todo);
+        assert_eq!(links, [
+            "https://github.com/Akulav/ai-girlfriend",
+            "https://github.com/Akulav/ai-girlfriend",
+            "https://example.org/a/b?x=1",
+            "https://example.net/",
+            "http://lan.local:8080/p",
+        ]);
+        assert!(extract_links("no links, just example.com and ftp://x").is_empty());
+    }
+
+    #[test]
+    fn only_given_links_and_pages_under_them_open() {
+        let given = vec!["https://github.com/Akulav/ai-girlfriend".to_string(), "https://example.org/docs/".to_string()];
+        let ok = |u: &str| link_allowed(u, &given);
+        assert!(ok("https://github.com/Akulav/ai-girlfriend"));
+        assert!(ok("http://www.github.com/Akulav/ai-girlfriend/"), "scheme, www. and a trailing / don't matter");
+        assert!(ok("https://github.com/Akulav/ai-girlfriend/blob/main/README.md"));
+        assert!(ok("https://raw.githubusercontent.com/Akulav/ai-girlfriend/main/.github/workflows/release.yml"), "a repo's raw files");
+        assert!(ok("https://example.org/docs/install?lang=en"));
+        assert!(ok("https://example.org/docs#setup"));
+        assert!(!ok("https://github.com/Akulav/ai-girlfriend-evil"), "a longer name is another repo");
+        assert!(!ok("https://github.com/Akulav"), "the parent is not under the link");
+        assert!(!ok("https://raw.githubusercontent.com/Akulav/other/main/x"));
+        assert!(!ok("https://example.org/doc"));
+        assert!(!ok("https://evil.com/github.com/Akulav/ai-girlfriend"));
+        assert!(!link_allowed("https://github.com/Akulav/ai-girlfriend", &[]));
+    }
+
+    /// A public repo link and a raw file under it, read the way fetch_url reads them (the field case's repo is private now). Network:
+    /// `cargo test live_link_fetch -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_link_fetch() {
+        let state = AppState::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let given = extract_links("Make it work like https://github.com/Akulav/local-ai-ui please.");
+        for url in ["https://github.com/Akulav/local-ai-ui", "https://raw.githubusercontent.com/Akulav/local-ai-ui/main/.github/workflows/release.yml"] {
+            assert!(link_allowed(url, &given), "{url}");
+            let page = rt.block_on(crate::web::fetch(&state, url)).unwrap();
+            println!("--- {url}: title {:?}, {} chars\n{}\n", page.title, page.text.len(), page.text.chars().take(400).collect::<String>());
+            assert!(page.text.len() > 1000, "readable text came back");
+        }
+    }
+
+    #[test]
+    fn web_off_still_lists_fetch_url() {
+        let names = |web: bool| -> Vec<String> {
+            definitions(false, web).iter().map(|d| d["function"]["name"].as_str().unwrap().to_string()).collect()
+        };
+        assert!(names(false).contains(&"fetch_url".to_string()) && !names(false).contains(&"web_search".to_string()));
+        assert!(names(true).contains(&"fetch_url".to_string()) && names(true).contains(&"web_search".to_string()));
     }
 }

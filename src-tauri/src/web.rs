@@ -229,7 +229,10 @@ pub async fn fetch(state: &AppState, url: &str) -> Result<Page> {
         .send()
         .await?;
     if !resp.status().is_success() {
-        return Err(anyhow!("HTTP {}", resp.status()));
+        let code = resp.status().as_u16();
+        // (GitHub answers 404 for a private repository too: say so, so the model can tell the user)
+        let hint = if matches!(code, 401 | 403 | 404) { " - the page doesn't exist or needs a login (a private repository, for example); Lumen can only read public pages" } else { "" };
+        return Err(anyhow!("HTTP {}{hint}", resp.status()));
     }
     let final_url = resp.url().to_string();
     let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
