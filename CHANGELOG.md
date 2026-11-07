@@ -7,6 +7,13 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-07
+
+### Fixed
+- Context meter: with no model loaded it measured against a 2,048-token window ("40k / 2k"). It now uses the
+  window of the model loaded last (remembered across restarts), shows only the tokens used if no model was ever
+  loaded, and switches to the real window as soon as a model loads.
+
 ## [0.12.0] - 2026-11-07
 
 ### Added

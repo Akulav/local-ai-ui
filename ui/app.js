@@ -383,8 +383,8 @@ function renderTopbar() {
       ${proj ? `<div class="crumb" data-go-project="${proj.id}">${icon("folder")}${esc(proj.name)} /</div>` : S.chat && S.projects.length ? `<button class="crumb link-proj" id="linkProj" title="${esc(t("linkProjectHint"))}">${icon("folder")}${esc(t("linkProject"))}</button>` : ""}
       <div class="title" id="chatTitle" title="${t("rename")}">${esc(S.chat?.title || t("newChat"))}</div>
       <div class="spacer"></div>
-      ${S.chat ? `<div class="ctx" title="${t("ctx")}: ${used} / ${budget} tokens">
-        <div class="ctx-top"><span>${t("ctx")}</span><span><b id="ctxNum">${fmtK(used)}</b> / ${fmtK(budget)}</span></div>
+      ${S.chat ? `<div class="ctx" title="${t("ctx")}: ${used}${budget ? ` / ${budget}` : ""} tokens">
+        <div class="ctx-top"><span>${t("ctx")}</span><span><b id="ctxNum">${fmtK(used)}</b>${budget ? ` / ${fmtK(budget)}` : ""}</span></div>
         <div class="ctx-bar"><div class="ctx-fill ${pct > mark ? "warn" : ""}" id="ctxFill" style="width:${pct}%"></div><div class="ctx-mark" style="left:${mark}%"></div></div></div>` : ""}
       ${modelPill()}
       ${S.chat ? `<button class="icon-btn" id="chatMore">${icon("more")}</button>` : ""}`;
@@ -1429,6 +1429,8 @@ listen("server-status", (e) => {
   S.info = e.payload;
   // the backend remembers the loaded model; keep the UI copy in sync so set_settings never writes back a stale one
   if (S.info.state === "ready" && S.info.model) S.settings.last_model = S.info.model;
+  // a (re)loaded model sets the context meter's scale (the chat's own cap still applies)
+  if (S.info.n_ctx && S.chat) S.budget = S.chat.ctx_limit ? Math.min(S.chat.ctx_limit, S.info.n_ctx) : S.info.n_ctx;
   renderStatus(); renderTopbar();
   if (prev !== S.info.state) {
     refreshModels();

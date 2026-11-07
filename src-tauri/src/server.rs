@@ -366,6 +366,7 @@ pub async fn start_llm(app: &AppHandle, model_file: &str) -> Result<()> {
     {
         let mut s = state.settings.write();
         s.last_model = Some(model_file.into());
+        s.last_n_ctx = n_ctx;
     }
     state.save_settings();
     state.touch();

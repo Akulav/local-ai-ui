@@ -40,10 +40,22 @@ pub fn ymd(secs: i64) -> String {
     format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Effective context window for a chat: its own cap (if set) bounded by the loaded model.
+/// Context window for a chat as far as it is known: its own cap (if set) bounded by the model's window –
+/// the loaded model's, or while none is loaded the last one's (before, an unloaded model showed
+/// "40k / 2k"). 0 when nothing is known yet (no cap, no model ever loaded).
+pub fn known_budget(state: &AppState, chat: &Chat) -> u32 {
+    let loaded = state.info.read().n_ctx;
+    let model = if loaded > 0 { loaded } else { state.settings.read().last_n_ctx };
+    match (chat.ctx_limit, model) {
+        (0, m) => m,
+        (cap, 0) => cap,
+        (cap, m) => cap.min(m),
+    }
+}
+
+/// Effective context window for a chat (prompt fitting, compression): `known_budget`, at least 2048.
 pub fn budget(state: &AppState, chat: &Chat) -> u32 {
-    let n_ctx = state.info.read().n_ctx.max(2048);
-    if chat.ctx_limit > 0 { chat.ctx_limit.min(n_ctx) } else { n_ctx }
+    known_budget(state, chat).max(2048)
 }
 
 /// Re-estimates what the chat occupies after its history changed outside a turn (a deleted
@@ -838,6 +850,26 @@ mod tests {
         assert_eq!(quick_title("hi"), None, "no topic: the model's title comes after the reply");
         assert_eq!(quick_title("   \n  "), None);
         assert!(quick_title(&"word ".repeat(40)).unwrap().chars().count() <= 49);
+    }
+
+    /// An unloaded model keeps the meter's scale from the last load instead of falling to 2048.
+    #[test]
+    fn context_window_survives_unload() {
+        let state = AppState::new().unwrap();
+        let mut chat = state.db.create_chat(None, "New chat").unwrap();
+        state.settings.write().last_n_ctx = 0;
+        state.info.write().n_ctx = 0;
+        assert_eq!(known_budget(&state, &chat), 0, "nothing known: the meter shows only what is used");
+        assert_eq!(budget(&state, &chat), 2048);
+        state.settings.write().last_n_ctx = 65536;
+        assert_eq!(known_budget(&state, &chat), 65536, "unloaded: last model's window");
+        state.info.write().n_ctx = 40960;
+        assert_eq!(known_budget(&state, &chat), 40960, "loaded model wins");
+        chat.ctx_limit = 16384;
+        assert_eq!(budget(&state, &chat), 16384, "the chat's own cap still applies");
+        state.info.write().n_ctx = 0;
+        state.settings.write().last_n_ctx = 0;
+        assert_eq!(known_budget(&state, &chat), 16384);
     }
 
     #[test]

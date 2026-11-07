@@ -90,6 +90,9 @@ pub struct Settings {
     /// llama.cpp backend: "vulkan" | "rocm" | "cpu"
     pub backend: String,
     pub last_model: Option<String>,
+    /// Context window of the model loaded last (set by the backend, kept by `set_settings`): the context
+    /// meter's scale while no model is loaded. 0 = no model loaded yet.
+    pub last_n_ctx: u32,
     /// 0 = auto (fit to VRAM)
     pub ctx_size: u32,
     pub kv_cache: String,
@@ -122,6 +125,7 @@ impl Default for Settings {
             reply_lang: "auto".into(),
             backend: "vulkan".into(),
             last_model: None,
+            last_n_ctx: 0,
             ctx_size: 0,
             kv_cache: "q8_0".into(),
             n_cpu_moe: 0,

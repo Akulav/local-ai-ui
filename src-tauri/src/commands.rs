@@ -36,8 +36,12 @@ pub fn get_state(app: AppHandle, state: S) -> Value {
 }
 
 #[tauri::command]
-pub fn set_settings(app: AppHandle, state: S, settings: Settings) {
-    *state.settings.write() = settings;
+pub fn set_settings(app: AppHandle, state: S, mut settings: Settings) {
+    {
+        let mut cur = state.settings.write();
+        settings.last_n_ctx = cur.last_n_ctx; // the backend's to set; the window's copy may be older
+        *cur = settings;
+    }
     state.save_settings();
     let updates = state.updates.read().clone();
     crate::refresh_tray(&app, &updates); // tray labels follow the UI language
@@ -162,7 +166,7 @@ pub async fn export_chat(app: AppHandle, id: String) -> R<Option<String>> {
 pub fn get_chat(state: S, id: String) -> R<Value> {
     let chat = state.db.chat(&id).map_err(e)?.ok_or("chat not found")?;
     let messages = state.db.messages(&id).map_err(e)?;
-    let budget = chat::budget(&state, &chat);
+    let budget = chat::known_budget(&state, &chat);
     let busy = state.generations.lock().contains_key(&id);
     // a reply still being written (or a tool running): the window shows it live again
     let live = if busy { state.live.lock().get(&id).cloned() } else { None };
@@ -185,7 +189,7 @@ pub fn pin_chat(state: S, id: String, pinned: bool) -> R<()> {
 pub fn set_chat_limit(state: S, id: String, limit: u32) -> R<u32> {
     state.db.set_chat_limit(&id, limit).map_err(e)?;
     let chat = state.db.chat(&id).map_err(e)?.ok_or("chat not found")?;
-    Ok(chat::budget(&state, &chat))
+    Ok(chat::known_budget(&state, &chat))
 }
 
 /// Links a chat to a project (its files and tools become available from the next message) or unlinks it.
