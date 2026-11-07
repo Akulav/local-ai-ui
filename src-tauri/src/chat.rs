@@ -402,7 +402,7 @@ fn prompt_estimate(state: &AppState, chat: &Chat, project: Option<&Project>, web
 fn fit_context(state: &AppState, chat_id: &str, project: Option<&Project>, web: bool, defs: &[Value], (high, low, keep): (f32, f32, usize)) -> Result<u32> {
     let chat = state.db.chat(chat_id)?.ok_or_else(|| anyhow!("chat deleted"))?;
     let b = budget(state, &chat) as f32;
-    let mut est =prompt_estimate(state, &chat, project, web, defs)?;
+    let mut est = prompt_estimate(state, &chat, project, web, defs)?;
     if (est as f32) <= b * high {
         return Ok(est);
     }

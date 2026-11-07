@@ -7,6 +7,21 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-07
+
+### Added
+- Error messages can be copied (Copy button on error toasts), and clicking the status bar's cut-off message shows it in
+  full.
+
+### Fixed
+- Error messages could run off the screen or vanish before you read them, with no way to close them. Toasts now have
+  a close button, stay while you hover them, wrap long text (paths, crash logs) and scroll inside instead of growing
+  past the window; at most four show at once and a repeated message doesn't stack. Esc closes them. The error box in a
+  chat wraps, has a height limit and can be dismissed; long dialogs scroll.
+
+### Removed
+- Two unused interface strings; a formatting nit.
+
 ## [0.11.0] - 2026-11-07
 
 ### Added

@@ -88,10 +88,38 @@ const t = (k, vars) => {
   return s;
 };
 
+const MAX_TOASTS = 4;
+/** A short message in the corner. Errors stay longer and can be copied; any toast closes with its ×
+ *  (or Esc), stays while hovered, and long text wraps and scrolls instead of leaving the screen.
+ *  The same message again refreshes the one shown instead of stacking copies. */
 function toast(msg, err = false) {
-  const n = el(`<div class="toast ${err ? "err" : ""}">${icon(err ? "warn" : "check", err ? "bad-ic" : "ok-ic")}<div>${esc(msg)}</div></div>`);
-  $("#toasts").appendChild(n);
-  setTimeout(() => n.remove(), err ? 7000 : 3200);
+  const text = String(msg ?? "");
+  const wrap = $("#toasts");
+  const same = [...wrap.children].find((n) => n.dataset.msg === text);
+  if (same) return same.arm();
+  const n = el(`<div class="toast ${err ? "err" : ""}" role="${err ? "alert" : "status"}">${icon(err ? "warn" : "check", err ? "bad-ic" : "ok-ic")}<div class="toast-msg"></div>
+    ${err ? `<button class="toast-btn" data-a="copy" title="${t("copy")}">${icon("copy")}</button>` : ""}<button class="toast-btn" data-a="close" title="${t("close")}">${icon("x")}</button></div>`);
+  n.querySelector(".toast-msg").textContent = text;
+  n.dataset.msg = text;
+  let timer = 0;
+  const close = () => { clearTimeout(timer); n.remove(); };
+  n.arm = () => { clearTimeout(timer); timer = setTimeout(close, err ? 12000 : 3500); };
+  n.addEventListener("mouseenter", () => clearTimeout(timer));
+  n.addEventListener("mouseleave", n.arm);
+  n.addEventListener("click", (e) => {
+    const a = e.target.closest("[data-a]")?.dataset.a;
+    if (a === "close") close();
+    if (a === "copy") { navigator.clipboard.writeText(text); n.querySelector('[data-a="copy"]').innerHTML = icon("check"); }
+  });
+  wrap.appendChild(n);
+  while (wrap.children.length > MAX_TOASTS) wrap.firstElementChild.remove();
+  n.arm();
+}
+/** Esc: closes the toasts first (true when there were any). */
+function closeToasts() {
+  const all = [...$("#toasts").children];
+  all.forEach((n) => n.remove());
+  return all.length > 0;
 }
 /** invoke() that also shows the error as a toast before rethrowing. */
 async function call(cmd, args) {
@@ -1339,7 +1367,7 @@ function renderStatus() {
   const stateLbl = { ready: t("ready"), starting: t("loading"), runtime: t("runtime"), error: t("error"), stopped: t("stopped") }[i.state] || i.state;
   const msg = i.state === "stopped" && i.idle_unloaded_min ? t("idleUnloaded", { n: i.idle_unloaded_min }) : i.state === "stopped" && i.crash ? t("serverCrashed", { x: i.crash }) : i.message || "";
   $("#statusbar").innerHTML = `
-    <div class="seg state"><span class="dot ${i.state}"></span><b>${esc(stateLbl)}</b>${i.state === "ready" ? `<span class="msg">${esc(shortModel(i.model))} · ${fmtK(i.n_ctx)} ctx</span>` : `<span class="msg" title="${esc(msg)}">${esc(msg)}</span>`}</div>
+    <div class="seg state"><span class="dot ${i.state}"></span><b>${esc(stateLbl)}</b>${i.state === "ready" ? `<span class="msg">${esc(shortModel(i.model))} · ${fmtK(i.n_ctx)} ctx</span>` : `<span class="msg ${msg ? "full" : ""}" id="statusMsg" title="${esc(msg)}">${esc(msg)}</span>`}</div>
     <button class="seg engine-btn ${S.engineOpen ? "on" : ""}" id="engineBtn" title="${t("engineStats")}">${icon("chip")}</button>
     <div class="spacer"></div>
     ${dls.length ? `<div class="seg">${icon("download")}${dls.map(([id, p]) => `${esc(p.label || id.replace("model:", ""))} ${p.total ? Math.round((p.done / p.total) * 100) : 0}%`).join(" · ")}</div>` : ""}
@@ -1349,6 +1377,9 @@ function renderStatus() {
     <div class="seg opt" title="${t("ram")} (llama-server)">${t("ram")} <b>${fmtBytes(m.ram || 0)}</b></div>
     ${i.pid ? `<div class="seg" title="${t("gpuLoad")}">${t("gpu")} <b>${Math.round(m.gpu || 0)}%</b></div><div class="seg opt" title="${t("cpuLoad")}">${t("cpu")} <b>${Math.round(m.cpu || 0)}%</b></div>` : ""}`;
   $("#engineBtn").onclick = (e) => { e.stopPropagation(); S.engineOpen = !S.engineOpen; renderStatus(); };
+  // the bar cuts long messages off: click shows the whole text (copyable when it is an error)
+  const sm = $("#statusMsg");
+  if (sm && sm.textContent) sm.onclick = () => toast(sm.textContent, i.state === "error" || !!i.crash);
   renderEnginePanel();
 }
 
@@ -1509,7 +1540,10 @@ listen("chat-event", (e) => {
     case "notice": toast(t(p.key)); break;
     case "error": {
       if (S.live) { S.live.seg.remove(); S.live = null; }
-      $("#thread").appendChild(el(`<div class="err-box">${icon("warn")} ${esc(p.error)}</div>`));
+      const box = el(`<div class="err-box chat-err" role="alert">${icon("warn")}<div class="err-text"></div><button class="toast-btn" title="${t("close")}">${icon("x")}</button></div>`);
+      box.querySelector(".err-text").textContent = p.error;
+      box.querySelector("button").onclick = () => box.remove();
+      $("#thread").appendChild(box);
       scrollBottom(true);
       break;
     }
@@ -1533,6 +1567,7 @@ document.addEventListener("keydown", (e) => {
     if (openMenuEl) return closeMenu();
     if (closeTopModal()) return;
     if (S.engineOpen) { S.engineOpen = false; return renderStatus(); }
+    if (closeToasts()) return;
     // stop the reply only when you are looking at that chat and not cancelling something else
     // (a rename, a message edit, a field on another page): Esc there used to stop the AI too
     if (S.busy[S.chatId] && escStopsReply(e)) call("stop_generation", { chatId: S.chatId });
