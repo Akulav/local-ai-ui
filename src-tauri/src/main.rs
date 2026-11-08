@@ -127,8 +127,8 @@ fn main() {
         println!("Lumen {} (made by Akulav)", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // Linux: the downloaded program installs itself (app menu entry) and runs from there; also handles
-    // --uninstall. Returns false when this process should end (the installed copy took over).
+    // Linux / macOS: the downloaded program installs itself (app menu entry / Lumen.app) and runs from there;
+    // also handles --uninstall. Returns false when this process should end (the installed copy took over).
     #[cfg(not(windows))]
     if !install::first_run() {
         return;

@@ -1,6 +1,6 @@
 {
   "name": "lumen",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "description": "Lumen - hassle-free local AI (Tauri + Rust + llama.cpp)",
   "author": "Akulav",

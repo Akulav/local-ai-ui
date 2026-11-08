@@ -7,6 +7,16 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-08
+
+### Changed
+- Exactly three release files, one per system, and the same file installs and updates: `Lumen-setup.exe`,
+  `lumen-linux-x64` and `lumen-macos-arm64` (plus `SHA256SUMS.txt`). The macOS disk image is gone: started from
+  Downloads, `lumen-macos-arm64` builds `~/Applications/Lumen.app` around itself (icon, ad-hoc signature) and opens it;
+  an existing `/Applications/Lumen.app` from the disk image is updated in place instead.
+- macOS: `--uninstall` now removes Lumen.app (`--delete-data` also the data); `--here` runs without installing.
+- Linux / macOS: a copy started with `--here` stays portable after an update instead of installing itself.
+
 ## [0.13.0] - 2026-11-08
 
 ### Added

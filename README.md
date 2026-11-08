@@ -86,10 +86,12 @@ searches the web when you ask it to, and keeps every chat on your machine.
 
 ## 📦 Installing, updating and uninstalling
 
+One file per system – the same file installs Lumen and later updates it. No disk image, zip or MSI.
+
 | System | File | Where Lumen lives | Shortcuts |
 |---|---|---|---|
 | Windows | `Lumen-setup.exe`: a wizard (English / Romanian) with a license page, a folder you can change and a *desktop shortcut* choice; per user, no administrator rights | `%LOCALAPPDATA%\Lumen` (data in `LumenData` inside it) | Start menu, desktop, *Settings → Apps* |
-| macOS | `Lumen-macos-arm64.dmg`: drag Lumen to Applications | data in `~/Library/Application Support/Lumen` | Applications (Launchpad, Spotlight) |
+| macOS | `lumen-macos-arm64`: right-click it → *Open* (or `chmod +x` it and run it in Terminal); on its first start it builds `Lumen.app` and opens it | `~/Applications/Lumen.app` (an older `/Applications/Lumen.app` is kept and updated); data in `~/Library/Application Support/Lumen` | Applications (Launchpad, Spotlight) |
 | Linux | `lumen-linux-x64`: `chmod +x` it and run it; it installs itself on its first start | `~/.local/share/lumen` (data in `LumenData` inside it) | app menu, desktop |
 
 **Updating.** Lumen checks for a new version 20 seconds after it starts and every 6 hours (Settings → About can turn
@@ -113,7 +115,7 @@ Installs made by the old installer (Lumen 0.8 and earlier) are taken over by the
 | System | How |
 |---|---|
 | Windows | *Settings → Apps → Lumen → Uninstall*, or Start menu → *Uninstall Lumen*. It asks whether to delete `LumenData` too (default: keep). |
-| macOS | Drag Lumen from Applications to the Bin; delete `~/Library/Application Support/Lumen` to remove the data. |
+| macOS | `~/Applications/Lumen.app/Contents/MacOS/lumen --uninstall` (add `--delete-data` to remove the data too), or drag Lumen from Applications to the Bin and delete `~/Library/Application Support/Lumen`. |
 | Linux | `~/.local/share/lumen/lumen --uninstall` (add `--delete-data` to remove the data too). |
 
 ## 💗 The tray and the command line
@@ -125,8 +127,8 @@ Settings → App → *Close to tray* turns that off. On a Linux desktop without 
 | Option | |
 |---|---|
 | `--version` | print the version and quit |
-| `--here` | Linux: run where the program is instead of installing it |
-| `--uninstall` [`--delete-data`] | Linux: remove the program and its menu entries (and the data); macOS: explains what to remove |
+| `--here` | Linux / macOS: run where the program is instead of installing it |
+| `--uninstall` [`--delete-data`] | Linux: remove the program and its menu entries; macOS: remove Lumen.app (and, with `--delete-data`, the data) |
 
 ## 🏗️ How it works
 
@@ -216,10 +218,9 @@ GitHub's Windows, Linux and macOS runners, create the tag `vX.Y.Z` and publish t
 | File | |
 |---|---|
 | `Lumen-setup.exe` | Windows setup wizard; also what an update runs |
-| `lumen-linux-x64` | the Linux program; also what an update downloads |
-| `lumen-macos-arm64` | the macOS program; what an update downloads |
-| `Lumen-macos-arm64.dmg` | Lumen.app for a first install on a Mac |
-| `SHA256SUMS.txt` | checksums of all of the above |
+| `lumen-linux-x64` | the Linux program: installs itself on its first start; also what an update downloads |
+| `lumen-macos-arm64` | the macOS program: builds Lumen.app on its first start; also what an update downloads |
+| `SHA256SUMS.txt` | checksums of the three |
 
 The release notes are the version's section of the changelog. The **CI** workflow checks every push and pull request on
 all three systems (versions agree, UI scripts parse, clippy without warnings, tests, the setup compiles).
@@ -241,7 +242,7 @@ cargo test -- --ignored          # also the live ones: real update pipeline agai
 run.bat, scripts/            one-click build, version bump, release checks, release notes, setup pictures
 .github/workflows/           ci.yml (checks on 3 systems), release.yml (tests → 3 builds → tag + release)
 ui/                          the interface: index.html, styles.css, app.js, i18n.js (English / Romanian), vendor/
-src-tauri/installer/         lumen.iss + Romanian.isl (Windows setup), Info.plist (macOS app), wizard pictures
+src-tauri/installer/         lumen.iss + Romanian.isl (Windows setup), Info.plist (macOS app, built in), wizard pictures
 src-tauri/src/               the Rust core (see CLAUDE.md for a file-by-file map)
 ```
 
@@ -252,7 +253,7 @@ src-tauri/src/               the Rust core (see CLAUDE.md for a file-by-file map
 | **"bad allocation"** / "The model server ran out of memory" | The engine could not get memory (RAM + page file) for a request. Close programs that use a lot of memory (another AI app, a game), pick a smaller context size, or let Windows manage a larger page file. Since 0.9 Lumen sizes the engine's RAM prompt cache from the free memory, which removes the usual cause. |
 | The model doesn't load / "llama-server exited" | Settings → Server logs (also `LumenData/logs/lumen.log`). Try a smaller model or context size, or another GPU backend. |
 | Slow replies | Check the engine panel (chip icon in the status bar): if VRAM is full, part of the model runs in RAM. Use a smaller quant or context. |
-| macOS: "Lumen can't be opened" on first start | Right-click Lumen in Applications → *Open* (the app is signed ad hoc, not by a paid Apple certificate). |
+| macOS: "lumen-macos-arm64 can't be opened" on first start | Right-click the file → *Open*, or in Terminal: `xattr -d com.apple.quarantine lumen-macos-arm64` (Lumen is signed ad hoc, not by a paid Apple certificate). The Lumen.app it builds opens normally afterwards. |
 | Linux: no tray icon | Install your desktop's app-indicator extension (e.g. *AppIndicator* on GNOME); without it, closing the window quits Lumen. |
 
 ## 📄 License

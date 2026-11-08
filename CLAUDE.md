@@ -28,7 +28,7 @@ The owner wants every change to ship as a release. For **every** change set (fea
   `lumen.exe` and the setup, copies them to `dist\Lumen\Lumen.exe` and `dist\Lumen-setup.exe`, launches the exe.
   `run.bat build` (no launch) / `quick` (exe only) / `dev` / `clean`.
 - Any system: `npm ci` then `npx tauri build --no-bundle` → `src-tauri/target/release/lumen(.exe)`. Tauri bundling is
-  off (`bundle.active: false`): the release workflow makes the setup / .app / .dmg itself.
+  off (`bundle.active: false`): the release workflow makes the Windows setup; Linux/macOS programs install themselves.
 - Linux build deps: `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev`.
 - `ui\` is **embedded in the exe at build time**: UI edits need a rebuild (or `run.bat dev`).
 - Rust lives in `%USERPROFILE%\.cargo\bin`. git is not on PATH: use GitHub Desktop's
@@ -43,9 +43,9 @@ The owner wants every change to ship as a release. For **every** change set (fea
   `check` (versions agree, tag `vX.Y.Z` not on GitHub yet) → `tests` (Windows + Ubuntu 22.04) → `build` (windows-latest,
   ubuntu-22.04, macos-15) → `release` (SHA256SUMS.txt, notes from CHANGELOG via `scripts/release-notes.ps1`, creates
   the tag, publishes; `-beta` versions are pre-releases). **Never create or push `v*` tags by hand.**
-- One file per system – the same file installs and updates (updater.rs `asset_name`):
-  `Lumen-setup.exe` (Windows, Inno Setup), `lumen-linux-x64`, `lumen-macos-arm64` (+ `Lumen-macos-arm64.dmg` with
-  Lumen.app for the first install). Keep these names and `SHA256SUMS.txt`: installed copies look for them.
+- Exactly three files, one per system – the same file installs and updates (updater.rs `asset_name`):
+  `Lumen-setup.exe` (Windows, Inno Setup), `lumen-linux-x64`, `lumen-macos-arm64`, plus `SHA256SUMS.txt`. No dmg,
+  zip or other extras (release.yml fails if any appear). Keep these names: installed copies look for them.
 - `.github/workflows/ci.yml`: every push/PR – versions agree, UI scripts parse, `cargo clippy -D warnings` + `cargo
   test` on Windows / Ubuntu 22.04 / macOS 15, and the setup compiles. Keep `Cargo.lock` and `package-lock.json`
   committed (`--locked`, `npm ci`); a new dependency's lockfile change goes in the same commit.
@@ -63,8 +63,11 @@ The owner wants every change to ship as a release. For **every** change set (fea
   `UninstallString` from the registry.
 - **Linux** (`install.rs`): the downloaded program copies itself to `~/.local/share/lumen/lumen`, writes
   `lumen.desktop` (app menu + Desktop) and starts that copy; `--here`, `--uninstall [--delete-data]`, `--version`.
-- **macOS**: Lumen.app from the dmg (`src-tauri/installer/Info.plist`, ad-hoc signed in CI); data always in
-  `~/Library/Application Support/Lumen` (never write into the bundle).
+- **macOS** (`install.rs`): the downloaded program, started outside a bundle, builds `~/Applications/Lumen.app`
+  around a copy of itself (`src-tauri/installer/Info.plist` compiled in, icon.icns, quarantine removed, ad-hoc
+  `codesign`) and `open`s it; an existing `/Applications/Lumen.app` (old dmg installs) is updated instead. `--here`,
+  `--uninstall [--delete-data]`. Data always in `~/Library/Application Support/Lumen` (never write into the bundle).
+- Linux/macOS: `--after-update` (the updater's relaunch) runs in place like `--here`.
 - **Updater** (`updater.rs`): checks 20 s after start + every 6 h (setting `check_updates`) and on demand; also offers
   newer llama.cpp builds. Install = download → SHA-256 against the release's `SHA256SUMS.txt` → Windows: start the setup
   detached with `/SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /LAUNCH=1 /DIR=<app dir> /LOG=…` and exit;
@@ -124,7 +127,7 @@ src-tauri/src/
   extract.rs    text from code/text/PDF/DOCX; prompts.rs every system prompt (EN/RO language rules)
   metrics.rs    1 s sampler: RAM, VRAM, GPU/CPU load, llama-server /metrics → `metrics`; idle unload; crash check
   updater.rs    update check (Lumen + llama.cpp), SHA256-verified install per OS, relaunch, cleanup
-  install.rs    Linux self-install / --uninstall (not on Windows)
+  install.rs    Linux / macOS self-install (menu entry / Lumen.app), --here, --uninstall (not on Windows)
   win.rs        platform on Windows: job object, console-free spawns, PDH GPU counters, commit memory, window icons
   unix.rs       platform on Linux/macOS: parent-death signal, process groups, sysinfo RAM/CPU, free memory
 ```

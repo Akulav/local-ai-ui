@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Lumen.app in the macOS disk image (release.yml fills in @VERSION@). The program inside keeps its data in
-     ~/Library/Application Support/Lumen; an update replaces Contents/MacOS/lumen and re-signs the app ad hoc
-     (src-tauri/src/updater.rs). -->
+<!-- Lumen.app's Info.plist. Compiled into the program: the release file lumen-macos-arm64 builds Lumen.app
+     around a copy of itself on its first start and fills in @VERSION@ (src-tauri/src/install.rs). The program
+     keeps its data in ~/Library/Application Support/Lumen; an update replaces Contents/MacOS/lumen and re-signs
+     the app ad hoc (src-tauri/src/updater.rs). -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>

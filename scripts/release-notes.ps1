@@ -22,7 +22,7 @@ if (-not $content) { throw "CHANGELOG.md section for $Version is empty - describ
 $body += "`n`n---`n" +
     "| System | Download | |`n|---|---|---|`n" +
     "| **Windows** 10/11 x64 | ``Lumen-setup.exe`` | setup wizard, per user, no admin rights |`n" +
-    "| **macOS** Apple Silicon | ``Lumen-macos-arm64.dmg`` | drag Lumen to Applications |`n" +
+    "| **macOS** Apple Silicon | ``lumen-macos-arm64`` | right-click it, *Open*: it installs itself as Lumen.app |`n" +
     "| **Linux** x64 | ``lumen-linux-x64`` | ``chmod +x lumen-linux-x64`` and run it: it installs itself (app menu) |`n`n" +
     "Already have Lumen? Use **Update** in the app (or the tray menu). Every file is listed in ``SHA256SUMS.txt``.`n`n" +
     "Made by Akulav."

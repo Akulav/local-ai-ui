@@ -5,12 +5,12 @@ name: Release
 # v<version> on that commit and publishes the release. A version that already has its tag is skipped, so nothing is
 # published twice. "Run workflow" on the Actions page does the same for the current version (e.g. after a failed run).
 #
-# One file per system, and the same file installs and updates (src-tauri/src/updater.rs downloads it):
+# Three files, one per system, and the same file installs and updates (src-tauri/src/updater.rs downloads it):
 #   Lumen-setup.exe          Windows: the setup wizard (Inno Setup, src-tauri/installer/lumen.iss) - also the update
 #   lumen-linux-x64          Linux: the program; it installs itself (app menu entry) on its first start
-#   lumen-macos-arm64        macOS: the program, what an update downloads
-#   Lumen-macos-arm64.dmg    macOS: Lumen.app to drag into Applications (the first install)
-#   SHA256SUMS.txt           checksums of all of them: an update refuses a file that doesn't match
+#   lumen-macos-arm64        macOS: the program; it builds ~/Applications/Lumen.app around itself on its first start
+#   SHA256SUMS.txt           checksums of the three: an update refuses a file that doesn't match
+# (No disk image, zip or other extras: src-tauri/src/install.rs does the Linux / macOS install.)
 # The release notes are the version's section of CHANGELOG.md (scripts/release-notes.ps1).
 
 on:
@@ -122,7 +122,7 @@ jobs:
         run: |
           mkdir -p dist
           # (Windows has ONE file, the setup below: it installs and it updates. Linux and macOS: the program itself,
-          # which also updates itself from it)
+          # which installs itself on its first start and is also what an update downloads)
           if [ "${{ runner.os }}" != "Windows" ]; then cp "src-tauri/target/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"; fi
       - name: Windows setup wizard (Lumen-setup.exe, with its uninstaller)
         if: runner.os == 'Windows'
@@ -133,18 +133,11 @@ jobs:
           $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
           & $iscc /Qp "/DAppVersion=$v" "/DExe=$PWD\src-tauri\target\release\lumen.exe" "/O$PWD\dist" src-tauri\installer\lumen.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: macOS app in a disk image (Lumen-macos-arm64.dmg)
-        if: runner.os == 'macOS'
+      - name: Exactly one file for this system
+        shell: bash
         run: |
-          v="${{ needs.check.outputs.version }}"
-          app="dmg/Lumen.app"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp src-tauri/target/release/lumen "$app/Contents/MacOS/lumen"
-          cp src-tauri/icons/icon.icns "$app/Contents/Resources/icon.icns"
-          sed "s/@VERSION@/$v/g" src-tauri/installer/Info.plist > "$app/Contents/Info.plist"
-          codesign --force --deep --sign - "$app"   # (ad hoc: no certificate; macOS asks once on first open)
-          ln -s /Applications dmg/Applications
-          hdiutil create -volname Lumen -srcfolder dmg -ov -format UDZO dist/Lumen-macos-arm64.dmg
+          ls -l dist
+          test "$(ls dist | wc -l)" -eq 1 && test -f "dist/${{ matrix.asset }}" || { echo "::error::dist must hold only ${{ matrix.asset }}"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
@@ -161,8 +154,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Checksums
-        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Checksums (of the three files)
+        run: |
+          cd dist
+          test "$(ls | LC_ALL=C sort | tr '\n' ' ')" = "Lumen-setup.exe lumen-linux-x64 lumen-macos-arm64 " || { ls; echo "::error::expected exactly the three release files"; exit 1; }
+          sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       - name: Release notes from CHANGELOG.md
         shell: pwsh
         run: ./scripts/release-notes.ps1 -Version "${{ needs.check.outputs.version }}" -OutFile notes.md

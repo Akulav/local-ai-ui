@@ -9,9 +9,10 @@
 //! - Windows: `Lumen-setup.exe` (Inno Setup, src-tauri/installer/lumen.iss). It is started on this
 //!   install's folder (/SILENT: a progress window, no questions) and Lumen ends; the setup uninstalls the
 //!   old version (LumenData - models, chats, settings - stays), installs the new one and starts it.
-//! - Linux: `lumen-linux-x64`, macOS: `lumen-macos-arm64` - the program itself. It is downloaded next to
-//!   this one, swapped in (this one becomes `.old`, removed at the next start) and started again; on
-//!   macOS inside Lumen.app, which is re-signed (ad hoc) and reopened.
+//! - Linux: `lumen-linux-x64`, macOS: `lumen-macos-arm64` - the program itself (the same file installs
+//!   itself on its first start: install.rs). It is downloaded, swapped in (this one becomes `.old`,
+//!   removed at the next start) and started again; on macOS inside Lumen.app, which is re-signed (ad hoc)
+//!   and reopened.
 //!
 //! A copy built on this computer (…/target/… or the repository's dist folder) is never replaced.
 
