@@ -1,6 +1,9 @@
 //! Portable llama.cpp runtime: downloaded once from the official GitHub releases into LumenData/runtime.
 //! Windows: the `win-<backend>-x64.zip` builds; Linux: `ubuntu-<backend>-x64.tar.gz`; macOS (Apple
 //! Silicon): `macos-arm64.tar.gz`, which runs on the GPU through Metal.
+//! CUDA (NVIDIA, Windows + Linux) comes as two files: the build (`…-bin-win-cuda-12.4-x64.zip`) and NVIDIA's
+//! runtime libraries (`cudart-…` with the same suffix), which go next to llama-server. CUDA 12 or 13 is
+//! picked from what `nvidia-smi` reports (`cuda_major`).
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
@@ -39,15 +42,17 @@ pub fn installed_version(state: &AppState, backend: &str) -> Option<String> {
     Some(std::fs::read_to_string(dir.join("version.txt")).unwrap_or_else(|_| "unknown".into()).trim().to_string())
 }
 
-/// Is `name` the llama.cpp release file for this system and backend?
-fn asset_matches(name: &str, backend: &str) -> bool {
+/// Is `name` the llama.cpp release file for this system and build (`backend`, or `cuda-12` / `cuda-13`)?
+fn asset_matches(name: &str, build: &str) -> bool {
     if !name.starts_with("llama-") {
         return false;
     }
     if cfg!(windows) {
-        let part = match backend {
+        let part = match build {
             "rocm" => "-bin-win-rocm",
             "cpu" => "-bin-win-cpu-x64",
+            "cuda-12" => "-bin-win-cuda-12.",
+            "cuda-13" => "-bin-win-cuda-13.",
             _ => "-bin-win-vulkan-x64",
         };
         name.contains(part) && name.ends_with(".zip") && name.contains("x64")
@@ -55,16 +60,74 @@ fn asset_matches(name: &str, backend: &str) -> bool {
         // (the same Metal build also runs CPU-only with --gpu-layers 0)
         name.ends_with("-bin-macos-arm64.tar.gz")
     } else {
-        match backend {
+        match build {
             "rocm" => name.contains("-bin-ubuntu-rocm-") && name.ends_with("-x64.tar.gz"),
             "cpu" => name.ends_with("-bin-ubuntu-x64.tar.gz"),
+            "cuda-12" | "cuda-13" => name.contains(&format!("-bin-ubuntu-{build}.")) && name.ends_with("-x64.tar.gz"),
             _ => name.ends_with("-bin-ubuntu-vulkan-x64.tar.gz"),
         }
     }
 }
 
-/// Newest llama.cpp release that has a build for this system and `backend`: (tag, url, file name).
-pub async fn latest_release(state: &AppState, backend: &str) -> Result<(String, String, String)> {
+/// NVIDIA's runtime libraries for a CUDA build: the `cudart-…` file of the same release with the same
+/// ending (`cudart-llama-bin-win-cuda-12.4-x64.zip` for `llama-b123-bin-win-cuda-12.4-x64.zip`).
+fn cudart_matches(name: &str, build_file: &str, tag: &str) -> bool {
+    let Some(suffix) = build_file.strip_prefix(&format!("llama-{tag}")) else { return false };
+    name.starts_with("cudart-") && name.ends_with(suffix)
+}
+
+/// CUDA build for this NVIDIA setup: 13.x needs a driver that supports CUDA 13 and a Turing or newer GPU
+/// (compute capability 7.5+; CUDA 13 dropped Maxwell, Pascal and Volta), anything else gets 12.x.
+fn cuda_major(driver_cuda: u32, lowest_cap: f32) -> u32 {
+    if driver_cuda >= 13 && lowest_cap >= 7.5 { 13 } else { 12 }
+}
+
+/// (CUDA version the driver supports, lowest compute capability of the NVIDIA GPUs) from `nvidia-smi`.
+fn parse_nvidia_smi(summary: &str, caps: &str) -> Option<(u32, f32)> {
+    let driver = regex::Regex::new(r"CUDA Version:\s*(\d+)").ok()?.captures(summary)?[1].parse().ok()?;
+    let cap = caps.lines().filter_map(|l| l.trim().parse::<f32>().ok()).fold(None, |m: Option<f32>, c| Some(m.map_or(c, |m| m.min(c))));
+    Some((driver, cap.unwrap_or(0.0)))
+}
+
+async fn nvidia_smi(args: &[&str]) -> Option<String> {
+    let mut cmd = tokio::process::Command::new("nvidia-smi");
+    cmd.args(args);
+    crate::platform::quiet(&mut cmd);
+    let out = cmd.output().await.ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The build to download for `backend`: itself, or for CUDA `cuda-12` / `cuda-13` after asking the driver.
+/// Fails early (before a ~600 MB download) without an NVIDIA driver or with one too old for CUDA 12.
+async fn build_for(state: &AppState, backend: &str) -> Result<String> {
+    if backend != "cuda" {
+        return Ok(backend.to_string());
+    }
+    let summary = nvidia_smi(&[]).await.ok_or_else(|| {
+        anyhow!("CUDA needs an NVIDIA graphics card and its driver (nvidia-smi was not found). Pick Vulkan in Settings for other cards.")
+    })?;
+    let caps = nvidia_smi(&["--query-gpu=compute_cap", "--format=csv,noheader"]).await.unwrap_or_default();
+    let (driver, cap) = parse_nvidia_smi(&summary, &caps).ok_or_else(|| anyhow!("could not read the CUDA version from nvidia-smi"))?;
+    if driver < 12 {
+        return Err(anyhow!("the NVIDIA driver supports only CUDA {driver}; CUDA 12 or newer is needed - update the driver, or pick Vulkan in Settings"));
+    }
+    let major = cuda_major(driver, cap);
+    state.log(format!("[runtime] NVIDIA driver supports CUDA {driver}, lowest compute capability {cap} -> CUDA {major} build"));
+    Ok(format!("cuda-{major}"))
+}
+
+/// A llama.cpp download: the build, and for CUDA NVIDIA's runtime libraries.
+pub struct Release {
+    pub tag: String,
+    pub url: String,
+    pub name: String,
+    /// (url, file name) of the `cudart-…` file
+    pub cudart: Option<(String, String)>,
+}
+
+/// Newest llama.cpp release that has a build for this system and `backend` (a settings value).
+pub async fn latest_release(state: &AppState, backend: &str) -> Result<Release> {
+    let build = build_for(state, &effective_backend(backend)).await?;
     let releases: Value = state
         .http
         .get("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20")
@@ -76,19 +139,26 @@ pub async fn latest_release(state: &AppState, backend: &str) -> Result<(String, 
         .error_for_status()?
         .json()
         .await?;
-    let backend = effective_backend(backend);
     releases
         .as_array()
         .into_iter()
         .flatten()
-        .find_map(|r| {
-            let tag = r["tag_name"].as_str()?.to_string();
-            r["assets"].as_array()?.iter().find_map(|a| {
-                let n = a["name"].as_str()?;
-                asset_matches(n, &backend).then(|| (tag.clone(), a["browser_download_url"].as_str().unwrap_or_default().to_string(), n.to_string()))
-            })
-        })
-        .ok_or_else(|| anyhow!("no llama.cpp release has a build for backend '{backend}' on this system"))
+        .find_map(|r| pick_release(r, &build))
+        .ok_or_else(|| anyhow!("no llama.cpp release has a build for '{build}' on this system"))
+}
+
+/// The files of one GitHub release for `build`; None if it lacks one (a CUDA build also needs its cudart file).
+fn pick_release(r: &Value, build: &str) -> Option<Release> {
+    let tag = r["tag_name"].as_str()?.to_string();
+    let assets = r["assets"].as_array()?;
+    let file = |a: &Value| Some((a["browser_download_url"].as_str()?.to_string(), a["name"].as_str()?.to_string()));
+    let (url, name) = assets.iter().filter_map(file).find(|(_, n)| asset_matches(n, build))?;
+    let cudart = if build.starts_with("cuda") {
+        Some(assets.iter().filter_map(file).find(|(_, n)| cudart_matches(n, &name, &tag))?)
+    } else {
+        None
+    };
+    Some(Release { tag, url, name, cudart })
 }
 
 /// Unpacks a llama.cpp archive (.zip or .tar.gz) into `dest`, keeping the executable bits.
@@ -145,32 +215,71 @@ pub async fn ensure(app: &AppHandle, backend: &str, force: bool) -> Result<PathB
         return Ok(exe);
     }
     state.log(format!("[runtime] fetching llama.cpp ({backend}) release list"));
-    let (tag, url, name) = latest_release(&state, backend).await?;
+    let Release { tag, url, name, cudart } = latest_release(&state, backend).await?;
 
     let tmp_zip = state.paths.runtime.join(&name);
     let cancel = Arc::new(AtomicBool::new(false));
-    crate::download::download(app, &state.http, "runtime", &format!("llama.cpp {tag} ({backend})"), &url, &tmp_zip, cancel)
+    crate::download::download(app, &state.http, "runtime", &format!("llama.cpp {tag} ({backend})"), &url, &tmp_zip, cancel.clone())
         .await
         .context("downloading llama.cpp")?;
+    let tmp_cudart = match &cudart {
+        Some((url, name)) => {
+            let path = state.paths.runtime.join(name);
+            crate::download::download(app, &state.http, "runtime", "NVIDIA CUDA runtime", url, &path, cancel)
+                .await
+                .context("downloading the CUDA runtime")?;
+            Some(path)
+        }
+        None => None,
+    };
 
     let dir = runtime_dir(&state, backend);
     let staging = state.paths.runtime.join(format!("staging-{backend}"));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
-    {
-        let archive = tmp_zip.clone();
-        let staging = staging.clone();
-        tokio::task::spawn_blocking(move || unpack(&archive, &staging)).await??;
-    }
-    // Some archives nest files in a folder: find the directory that holds llama-server
-    let root = find_server_dir(&staging).ok_or_else(|| anyhow!("{SERVER} missing from the llama.cpp archive"))?;
+    let root = {
+        let (archive, cudart, staging) = (tmp_zip.clone(), tmp_cudart.clone(), staging.clone());
+        tokio::task::spawn_blocking(move || unpack_build(&archive, cudart.as_deref(), &staging)).await??
+    };
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::rename(&root, &dir).or_else(|_| copy_dir(&root, &dir))?;
     let _ = std::fs::remove_dir_all(&staging);
     let _ = std::fs::remove_file(&tmp_zip);
+    if let Some(c) = tmp_cudart {
+        let _ = std::fs::remove_file(c);
+    }
     std::fs::write(dir.join("version.txt"), &tag)?;
-    state.log(format!("[runtime] installed llama.cpp {tag} ({backend})"));
+    state.log(format!("[runtime] installed llama.cpp {tag} ({name})"));
     Ok(dir.join(SERVER))
+}
+
+/// Unpacks a build (and NVIDIA's runtime libraries, for CUDA) under `staging`; returns the folder that holds
+/// llama-server with everything it needs (some archives nest their files in a folder).
+fn unpack_build(build: &Path, cudart: Option<&Path>, staging: &Path) -> Result<PathBuf> {
+    unpack(build, &staging.join("build"))?;
+    let root = find_server_dir(&staging.join("build")).ok_or_else(|| anyhow!("{SERVER} missing from the llama.cpp archive"))?;
+    if let Some(c) = cudart {
+        unpack(c, &staging.join("cudart"))?;
+        copy_files_flat(&staging.join("cudart"), &root)?;
+    }
+    Ok(root)
+}
+
+/// Copies every file under `from` (any depth) straight into `to`, keeping files already there: NVIDIA's
+/// libraries must sit next to llama-server (Windows DLL search, Linux LD_LIBRARY_PATH).
+fn copy_files_flat(from: &Path, to: &Path) -> std::io::Result<()> {
+    for e in std::fs::read_dir(from)?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            copy_files_flat(&p, to)?;
+        } else {
+            let target = to.join(e.file_name());
+            if !target.exists() {
+                std::fs::copy(&p, target)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn find_server_dir(dir: &std::path::Path) -> Option<PathBuf> {
@@ -248,5 +357,125 @@ mod tests {
             assert_eq!(pick("cpu"), ["llama-b12179-bin-ubuntu-x64.tar.gz"]);
             assert_eq!(pick("rocm"), ["llama-b12179-bin-ubuntu-rocm-10.0-x64.tar.gz"]);
         }
+    }
+
+    /// Asset list of llama.cpp release b12194 (2026-11-08), the CUDA part and its neighbours.
+    const B12194: &[&str] = &[
+        "cudart-llama-b12194-bin-ubuntu-cuda-12.8-x64.tar.gz",
+        "cudart-llama-b12194-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+        "cudart-llama-b12194-bin-ubuntu-cuda-13.5-x64.tar.gz",
+        "cudart-llama-bin-win-cuda-12.4-x64.zip",
+        "cudart-llama-bin-win-cuda-13.5-arm64.zip",
+        "cudart-llama-bin-win-cuda-13.5-x64.zip",
+        "llama-b12194-bin-ubuntu-cuda-12.8-x64.tar.gz",
+        "llama-b12194-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+        "llama-b12194-bin-ubuntu-cuda-13.5-x64.tar.gz",
+        "llama-b12194-bin-ubuntu-rocm-10.0-x64.tar.gz",
+        "llama-b12194-bin-ubuntu-vulkan-x64.tar.gz",
+        "llama-b12194-bin-ubuntu-x64.tar.gz",
+        "llama-b12194-bin-win-cpu-x64.zip",
+        "llama-b12194-bin-win-cuda-12.4-x64.zip",
+        "llama-b12194-bin-win-cuda-13.5-arm64.zip",
+        "llama-b12194-bin-win-cuda-13.5-x64.zip",
+        "llama-b12194-bin-win-rocm-10.0-x64.zip",
+        "llama-b12194-bin-win-vulkan-x64.zip",
+    ];
+
+    fn release_json(names: &[&str]) -> Value {
+        let assets: Vec<Value> = names.iter().map(|n| serde_json::json!({"name": n, "browser_download_url": format!("https://x/{n}")})).collect();
+        serde_json::json!({"tag_name": "b12194", "assets": assets})
+    }
+
+    /// A CUDA build comes with the NVIDIA runtime file of the same flavour; other builds come alone.
+    #[test]
+    fn cuda_build_comes_with_its_runtime() {
+        let r = release_json(B12194);
+        let files = |build: &str| pick_release(&r, build).map(|r| (r.name, r.cudart.map(|c| c.1)));
+        if cfg!(windows) {
+            assert_eq!(files("cuda-12"), Some(("llama-b12194-bin-win-cuda-12.4-x64.zip".into(), Some("cudart-llama-bin-win-cuda-12.4-x64.zip".into()))));
+            assert_eq!(files("cuda-13"), Some(("llama-b12194-bin-win-cuda-13.5-x64.zip".into(), Some("cudart-llama-bin-win-cuda-13.5-x64.zip".into()))));
+            assert_eq!(files("vulkan"), Some(("llama-b12194-bin-win-vulkan-x64.zip".into(), None)));
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(files("cuda-12"), Some(("llama-b12194-bin-ubuntu-cuda-12.8-x64.tar.gz".into(), Some("cudart-llama-b12194-bin-ubuntu-cuda-12.8-x64.tar.gz".into()))));
+            assert_eq!(files("cuda-13"), Some(("llama-b12194-bin-ubuntu-cuda-13.5-x64.tar.gz".into(), Some("cudart-llama-b12194-bin-ubuntu-cuda-13.5-x64.tar.gz".into()))));
+            assert_eq!(files("vulkan"), Some(("llama-b12194-bin-ubuntu-vulkan-x64.tar.gz".into(), None)));
+        }
+        if !cfg!(target_os = "macos") {
+            // a release whose runtime file is missing is skipped, not installed half
+            let partial: Vec<&str> = B12194.iter().copied().filter(|n| !n.starts_with("cudart-")).collect();
+            assert!(pick_release(&release_json(&partial), "cuda-12").is_none());
+            assert!(pick_release(&release_json(&partial), "vulkan").is_some());
+        }
+    }
+
+    /// Real CUDA 12 install from GitHub's newest release (~650 MB on Windows, ~750 MB on Linux; kept in
+    /// `LUMEN_TEST_CUDA_DIR` for reruns): both files are found, unpacked into one folder, NVIDIA's
+    /// libraries sit next to llama-server, and llama-server starts. Works without an NVIDIA card.
+    /// `LUMEN_TEST_CUDA_DIR=… cargo test live_cuda_install -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_cuda_install() {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+        let cache = PathBuf::from(std::env::var("LUMEN_TEST_CUDA_DIR").expect("set LUMEN_TEST_CUDA_DIR"));
+        std::fs::create_dir_all(&cache).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let http = reqwest::Client::builder().user_agent(LUMEN_UA).build().unwrap();
+        let rel = rt.block_on(async {
+            let list: Value = http.get("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=5").send().await.unwrap().json().await.unwrap();
+            let rel = list.as_array().unwrap().iter().find_map(|r| pick_release(r, "cuda-12")).expect("a release with a CUDA 12 build");
+            let mut files = vec![(rel.url.clone(), rel.name.clone())];
+            files.extend(rel.cudart.clone());
+            for (url, name) in files {
+                let path = cache.join(&name);
+                if path.exists() {
+                    continue;
+                }
+                println!("downloading {name}");
+                let mut out = tokio::fs::File::create(cache.join("partial")).await.unwrap();
+                let mut body = http.get(&url).send().await.unwrap().error_for_status().unwrap().bytes_stream();
+                while let Some(chunk) = body.next().await {
+                    out.write_all(&chunk.unwrap()).await.unwrap();
+                }
+                out.flush().await.unwrap();
+                drop(out);
+                std::fs::rename(cache.join("partial"), &path).unwrap();
+            }
+            rel
+        });
+        println!("{} + {:?}", rel.name, rel.cudart.as_ref().map(|c| &c.1));
+        let staging = cache.join("staging");
+        let _ = std::fs::remove_dir_all(&staging);
+        let cudart = cache.join(&rel.cudart.as_ref().unwrap().1);
+        let root = unpack_build(&cache.join(&rel.name), Some(&cudart), &staging).unwrap();
+        let names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let has = |p: &str| names.iter().any(|n| n.starts_with(p));
+        assert!(names.iter().any(|n| n == SERVER));
+        assert!(has("ggml-cuda") || has("libggml-cuda"), "the CUDA backend: {names:?}");
+        assert!(has("cudart64_12") || has("libcudart.so.12"), "NVIDIA's runtime next to llama-server: {names:?}");
+        assert!(has("cublas64_12") || has("libcublas.so.12"), "cuBLAS next to llama-server: {names:?}");
+        let mut cmd = std::process::Command::new(root.join(SERVER));
+        cmd.arg("--version");
+        if cfg!(target_os = "linux") {
+            cmd.env("LD_LIBRARY_PATH", &root);
+        }
+        let out = cmd.output().unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        println!("{text}");
+        assert!(out.status.success() && text.contains("version"), "llama-server starts");
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn cuda_flavour_follows_driver_and_gpu() {
+        let summary = "| NVIDIA-SMI 581.42                 Driver Version: 581.42         CUDA Version: 13.0     |";
+        assert_eq!(parse_nvidia_smi(summary, "8.9\n"), Some((13, 8.9)));
+        assert_eq!(parse_nvidia_smi(summary, "8.9\n6.1\n"), Some((13, 6.1)), "the oldest card decides");
+        assert_eq!(parse_nvidia_smi("no header here", "8.9"), None);
+        assert_eq!(cuda_major(13, 8.9), 13); // RTX 40 on a new driver
+        assert_eq!(cuda_major(13, 12.0), 13); // RTX 50
+        assert_eq!(cuda_major(13, 6.1), 12); // GTX 10xx: CUDA 13 dropped Pascal
+        assert_eq!(cuda_major(12, 8.9), 12); // driver too old for 13
+        assert_eq!(cuda_major(13, 0.0), 12); // capability unknown: the safe choice
     }
 }

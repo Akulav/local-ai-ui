@@ -78,7 +78,7 @@ searches the web when you ask it to, and keeps every chat on your machine.
 
 | | Minimum | Comfortable |
 |---|---|---|
-| **GPU** | 8 GB VRAM with Vulkan (a 7–9B model), or CPU only | 16 GB VRAM (a 27B model), e.g. AMD RX 9070 XT |
+| **GPU** | 8 GB VRAM, AMD / NVIDIA / Intel (a 7–9B model), or CPU only | 16 GB VRAM (a 27B model), e.g. AMD RX 9070 XT or NVIDIA RTX 4080 |
 | **RAM** | 16 GB | 32 GB |
 | **Disk** | ~10 GB (engine + one small model) | more for bigger models |
 | **OS** | Windows 10/11 x64, a Linux desktop (x86-64, WebKitGTK 4.1), or macOS 11+ on Apple Silicon | |
@@ -140,8 +140,8 @@ flowchart LR
     Core -. updates .-> GH["GitHub releases<br/>Lumen · llama.cpp"]
 ```
 
-- **Engine.** Lumen downloads llama.cpp's official build for your system (Windows: Vulkan, ROCm or CPU; Linux:
-  Vulkan, ROCm or CPU; macOS: Metal) into `LumenData/runtime` and starts `llama-server` with `--fit`, which picks GPU
+- **Engine.** Lumen downloads llama.cpp's official build for your system (Windows and Linux: Vulkan for any GPU,
+  CUDA for NVIDIA, ROCm for AMD, or CPU; macOS: Metal) into `LumenData/runtime` and starts `llama-server` with `--fit`, which picks GPU
   layers and the largest context that fits your free VRAM. Its RAM prompt cache is sized from the memory that is free
   when it starts.
 - **A turn.** The prompt is the system prompt, a summary of compressed turns and the recent messages. Project chats

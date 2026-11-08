@@ -2,7 +2,7 @@
 
 Lumen (made by Akulav) is a desktop app for chatting with local LLMs on **Windows, Linux (x86-64) and macOS (Apple
 Silicon)**. Tauri 2 shell + Rust backend + plain HTML/CSS/JS UI (no bundler). Inference runs in a `llama-server`
-child process (official llama.cpp build: Vulkan / ROCm / CPU on Windows and Linux, Metal on macOS) that Lumen
+child process (official llama.cpp build: Vulkan / CUDA / ROCm / CPU on Windows and Linux, Metal on macOS) that Lumen
 downloads and manages. Dev machine: Windows (RX 9070 XT 16 GB, 32 GB RAM, 4 GB page file).
 
 ## Always: bump the version and prove it works
@@ -80,6 +80,10 @@ The owner wants every change to ship as a release. For **every** change set (fea
 - Spawn children from async code (tokio worker threads): on Linux the death signal follows the spawning thread.
 - `runtime.rs`: `effective_backend` (macOS → `metal`), `asset_matches` per OS (`.zip` on Windows, `.tar.gz` elsewhere),
   `llama-server` without `.exe` off Windows; Linux children get `LD_LIBRARY_PATH` = the runtime folder.
+- CUDA (`backend: "cuda"`, NVIDIA on Windows/Linux): `build_for` asks `nvidia-smi` (driver's CUDA version, lowest
+  compute capability) and picks the `cuda-13` build (driver ≥ 13 and GPU ≥ 7.5) or `cuda-12`; the release's
+  `cudart-…` file with the same ending (NVIDIA's DLLs / .so) is unpacked next to llama-server. No NVIDIA card here:
+  `live_cuda_install` (ignored test) proves the download + unpack, not the speed.
 - No tray (Linux without app indicator) sets `state.no_tray`: closing the window then quits.
 
 ## Working notes for Claude

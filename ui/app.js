@@ -1206,7 +1206,11 @@ function renderSettings() {
   html += f(t("replyLang"), t("replyLangHint"), sel("reply_lang", [["auto", t("auto")], ["en", "English"], ["ro", "Română"]]));
   html += `<h3>${icon("chip")}${t("engine")}</h3>`;
   // (macOS has one llama.cpp build, Metal: runtime.rs `effective_backend`)
-  const backends = S.os === "macos" ? [["metal", t("metalRec")], ["cpu", t("cpuOnly")]] : [["vulkan", t("vulkanRec")], ["rocm", "ROCm / HIP"], ["cpu", t("cpuOnly")]];
+  // an NVIDIA card (named once a model has loaded) gets CUDA as the recommendation
+  const nvidia = /nvidia|geforce|quadro|tesla|rtx/i.test(S.info.gpu_name || "");
+  const backends = S.os === "macos" ? [["metal", t("metalRec")], ["cpu", t("cpuOnly")]]
+    : nvidia ? [["cuda", t("cudaRec")], ["vulkan", "Vulkan"], ["rocm", t("rocmAmd")], ["cpu", t("cpuOnly")]]
+    : [["vulkan", t("vulkanRec")], ["rocm", t("rocmAmd")], ["cuda", t("cudaNvidia")], ["cpu", t("cpuOnly")]];
   html += f(t("backend"), S.os === "macos" ? t("backendHintMac") : t("backendHint"), sel("backend", backends));
   html += f(t("runtimeVer"), esc(S.runtime || "—"), `<button class="btn" id="updRt">${icon("download")}${t("update")}</button>`);
   html += f(t("ctxSize"), t("ctxSizeHint"), sel("ctx_size", [[0, t("auto")], [8192, "8k"], [16384, "16k"], [32768, "32k"], [65536, "64k"], [131072, "128k"], [262144, "256k"]]));

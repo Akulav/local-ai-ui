@@ -87,7 +87,7 @@ pub struct Settings {
     pub ui_lang: String,
     /// Reply language: "auto" | "en" | "ro"
     pub reply_lang: String,
-    /// llama.cpp backend: "vulkan" | "rocm" | "cpu"
+    /// llama.cpp backend: "vulkan" | "rocm" | "cuda" | "cpu" (macOS: "metal" | "cpu")
     pub backend: String,
     pub last_model: Option<String>,
     /// Context window of the model loaded last (set by the backend, kept by `set_settings`): the context

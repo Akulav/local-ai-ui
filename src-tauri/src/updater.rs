@@ -119,7 +119,7 @@ pub async fn check(app: &AppHandle) -> UpdateInfo {
         }
         match rt {
             // only offered once a runtime is installed (the first one is fetched when a model loads)
-            Ok((tag, _, _)) => u.runtime = runtime_current.as_deref().filter(|cur| newer_runtime(cur, &tag)).map(|_| tag),
+            Ok(r) => u.runtime = runtime_current.as_deref().filter(|cur| newer_runtime(cur, &r.tag)).map(|_| r.tag),
             Err(e) => {
                 if !u.error.is_empty() {
                     u.error.push_str(" · ");

@@ -7,6 +7,14 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-08
+
+### Added
+- CUDA engine for NVIDIA cards (Windows and Linux): Settings → GPU backend → CUDA. Lumen checks the NVIDIA driver,
+  picks llama.cpp's CUDA 12 or CUDA 13 build to match the driver and card, and installs NVIDIA's runtime libraries
+  with it (first download ≈ 600 MB). Usually faster than Vulkan on NVIDIA, especially at reading long prompts. On an
+  NVIDIA card it is marked as recommended; without an NVIDIA driver it says so before downloading anything.
+
 ## [0.12.1] - 2026-11-07
 
 ### Fixed
