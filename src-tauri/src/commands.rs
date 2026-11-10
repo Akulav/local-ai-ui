@@ -240,15 +240,18 @@ pub fn stop_generation(state: S, chat_id: String) {
 
 #[tauri::command]
 pub fn regenerate(app: AppHandle, chat_id: String, think: bool, web: bool) {
+    // (errors are shown in the chat by chat::regenerate / chat::send themselves)
     tauri::async_runtime::spawn(async move {
-        if let Err(err) = chat::regenerate(app.clone(), chat_id.clone(), think, web).await {
-            chat::emit(&app, &chat_id, "error", json!({"error": err.to_string()}));
-        }
+        let _ = chat::regenerate(app, chat_id, think, web).await;
     });
 }
 
 #[tauri::command]
 pub fn edit_and_resend(app: AppHandle, state: S, chat_id: String, message_id: String, text: String, think: bool, web: bool) -> R<()> {
+    // (the running reply would keep writing into the messages deleted here)
+    if state.generations.lock().contains_key(&chat_id) {
+        return Err("wait until the reply is finished (or stop it) before editing a message".into());
+    }
     let msgs = state.db.messages(&chat_id).map_err(e)?;
     let m = msgs.iter().find(|m| m.id == message_id).ok_or("message not found")?;
     let research = m.meta["research"].as_bool().unwrap_or(false);
@@ -353,6 +356,10 @@ pub fn open_url(app: AppHandle, url: String) -> R<()> {
 
 #[tauri::command]
 pub fn open_path(app: AppHandle, path: String) -> R<()> {
+    // only folders (Lumen's data, a project): opening a file would run it with its default program
+    if !std::path::Path::new(&path).is_dir() {
+        return Err("only folders can be opened".into());
+    }
     app.opener().open_path(path, None::<&str>).map_err(e)
 }
 

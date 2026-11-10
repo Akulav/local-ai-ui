@@ -230,6 +230,16 @@ fn conversation_links(state: &AppState, chat_id: &str) -> Result<Vec<String>> {
 /// "https://www.GitHub.com/a/b/#x" -> "github.com/a/b": scheme, www., fragment and trailing / don't matter.
 fn norm_link(url: &str) -> String {
     let s = url.trim();
+    // parsed like the request will be: `..` segments resolved, user@ and default ports dropped
+    if let Ok(u) = reqwest::Url::parse(s) {
+        if let Some(host) = u.host_str() {
+            let host = host.to_ascii_lowercase();
+            let host = host.strip_prefix("www.").unwrap_or(&host);
+            let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
+            let query = u.query().map(|q| format!("?{q}")).unwrap_or_default();
+            return format!("{host}{port}{}{query}", u.path().trim_end_matches('/'));
+        }
+    }
     let s = s.split('#').next().unwrap_or(s);
     let s = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
     let (host, path) = s.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((s, String::new()));
@@ -259,6 +269,28 @@ pub fn link_allowed(url: &str, links: &[String]) -> bool {
     })
 }
 
+/// Does `url` point at this computer or the local network (localhost, 192.168.x.x, *.local…)? With
+/// Web on, the model may still open such an address only when the user gave the link.
+pub fn is_local_address(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url.trim()) else { return false };
+    let Some(host) = u.host_str() else { return false };
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let v4 = |ip: std::net::Ipv4Addr| {
+        let o = ip.octets();
+        ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified() || ip.is_broadcast() || (o[0] == 100 && (64..128).contains(&o[1]))
+    };
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => v4(ip),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || ip.is_unspecified() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 || ip.to_ipv4_mapped().is_some_and(v4)
+        }
+        Err(_) => {
+            host == "localhost" || !host.contains('.') || [".localhost", ".local", ".lan", ".internal", ".home.arpa"].iter().any(|s| host.ends_with(s))
+        }
+    }
+}
+
 /// Resolve a model-provided path inside the project folder, rejecting escapes.
 pub fn resolve(folder: &Path, rel: &str) -> Result<(PathBuf, String)> {
     let root = dunce(folder.canonicalize()?);
@@ -276,6 +308,18 @@ pub fn resolve(folder: &Path, rel: &str) -> Result<(PathBuf, String)> {
     }
     if !norm.starts_with(&root) {
         return Err(anyhow!("path is outside the project folder"));
+    }
+    // a symlink or junction inside the project must not lead outside it: the deepest part of the
+    // path that exists (a dangling link counts) has to resolve to a place under the root
+    let mut existing = norm.as_path();
+    while existing.symlink_metadata().is_err() {
+        match existing.parent() {
+            Some(p) => existing = p,
+            None => break,
+        }
+    }
+    if !existing.canonicalize().is_ok_and(|real| dunce(real).starts_with(&root)) {
+        return Err(anyhow!("path is outside the project folder (it goes through a link)"));
     }
     let rel_clean = norm.strip_prefix(&root).unwrap_or(&norm).to_string_lossy().replace('\\', "/");
     Ok((norm, rel_clean))
@@ -565,10 +609,15 @@ async fn run_inner(ctx: &ToolCtx<'_>, call_id: &str, name: &str, a: &Value) -> R
         }
         "fetch_url" => {
             let url = s(a, "url")?;
-            if !ctx.web && !link_allowed(url, &conversation_links(&state, ctx.chat_id)?) {
-                return Err(anyhow!(
-                    "`{url}` does not appear in this conversation. With Web off, only links from the user's messages or the project files you read (and pages under them) can be opened. Ask the user to turn on Web if you need more."
-                ));
+            let local = is_local_address(url);
+            if (!ctx.web || local) && !link_allowed(url, &conversation_links(&state, ctx.chat_id)?) {
+                return Err(if local {
+                    anyhow!("`{url}` is on this computer or the local network; such addresses open only when the user gives the link in a message.")
+                } else {
+                    anyhow!(
+                        "`{url}` does not appear in this conversation. With Web off, only links from the user's messages or the project files you read (and pages under them) can be opened. Ask the user to turn on Web if you need more."
+                    )
+                });
             }
             let page = crate::web::fetch(&state, url).await?;
             let text: String = page.text.chars().take(24_000).collect();
@@ -619,6 +668,37 @@ mod tests {
         assert!(!ok("https://example.org/doc"));
         assert!(!ok("https://evil.com/github.com/Akulav/ai-girlfriend"));
         assert!(!link_allowed("https://github.com/Akulav/ai-girlfriend", &[]));
+        assert!(!ok("https://github.com/Akulav/ai-girlfriend/../../evil/x"), "`..` is resolved like the request resolves it");
+        assert!(!ok("https://github.com@evil.com/Akulav/ai-girlfriend"), "user@ is not the host");
+        assert!(ok("https://github.com:443/Akulav/ai-girlfriend/issues"), "the default port doesn't matter");
+    }
+
+    /// A junction inside the project that points outside it must not let the model read or write there.
+    #[cfg(windows)]
+    #[test]
+    fn links_out_of_the_project_are_refused() {
+        let base = std::env::temp_dir().join(format!("lumen-resolve-{}", new_id()));
+        let (proj, outside) = (base.join("proj"), base.join("outside"));
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let st = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(proj.join("escape")).arg(&outside).output().unwrap();
+        assert!(st.status.success(), "mklink /J failed");
+        assert!(resolve(&proj, "src/new.txt").is_ok(), "a new file in a real folder");
+        assert!(resolve(&proj, "escape").is_err());
+        assert!(resolve(&proj, "escape/secret.txt").is_err(), "a file that doesn't exist yet behind the link");
+        assert!(resolve(&proj, "src/../escape/x/y.txt").is_err());
+        let _ = std::fs::remove_dir(proj.join("escape"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn local_addresses_are_recognised() {
+        for u in ["http://localhost:8080/x", "http://127.0.0.1/", "http://192.168.1.1/admin", "http://10.0.0.5", "http://[::1]:3000/", "http://169.254.169.254/latest", "http://router/", "http://nas.local/", "http://[::ffff:192.168.0.1]/"] {
+            assert!(is_local_address(u), "{u}");
+        }
+        for u in ["https://github.com/a/b", "https://8.8.8.8/", "https://en.wikipedia.org/wiki/X", "not a url"] {
+            assert!(!is_local_address(u), "{u}");
+        }
     }
 
     /// A public repo link and a raw file under it, read the way fetch_url reads them (the field case's repo is private now). Network:

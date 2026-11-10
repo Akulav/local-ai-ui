@@ -215,7 +215,8 @@ pub struct Page {
 }
 
 pub async fn fetch(state: &AppState, url: &str) -> Result<Page> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    let url = url.trim();
+    if !reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some()) {
         return Err(anyhow!("only http(s) URLs are supported"));
     }
     let mut req = state.http.get(url);
@@ -236,9 +237,18 @@ pub async fn fetch(state: &AppState, url: &str) -> Result<Page> {
     }
     let final_url = resp.url().to_string();
     let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
-    let bytes = resp.bytes().await?;
-    if bytes.len() > 25 * 1024 * 1024 {
+    // read at most MAX_PAGE bytes: a huge (or endless) response must not fill the memory first
+    const MAX_PAGE: usize = 25 * 1024 * 1024;
+    if resp.content_length().is_some_and(|l| l > MAX_PAGE as u64) {
         return Err(anyhow!("page too large"));
+    }
+    let mut resp = resp;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if bytes.len() + chunk.len() > MAX_PAGE {
+            return Err(anyhow!("page too large"));
+        }
+        bytes.extend_from_slice(&chunk);
     }
     if ctype.contains("pdf") || final_url.to_lowercase().ends_with(".pdf") {
         let b = bytes.to_vec();

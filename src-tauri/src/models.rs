@@ -169,9 +169,21 @@ pub async fn delete_model(app: &AppHandle, file: &str) -> Result<()> {
 pub async fn download_model(app: &AppHandle, repo: &str, path: &str) -> Result<String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let name = safe_file_name(path)?;
+    let mut parts = repo.split('/');
+    let valid = |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s != "." && s != ".." && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)));
+    if !(valid(parts.next()) && valid(parts.next()) && parts.next().is_none()) {
+        return Err(anyhow!("`{repo}` is not a Hugging Face repository (owner/name)"));
+    }
     let id = format!("model:{name}");
     let cancel = Arc::new(AtomicBool::new(false));
-    state.downloads.lock().insert(id.clone(), cancel.clone());
+    {
+        // two downloads of the same file would write into the same .part
+        let mut d = state.downloads.lock();
+        if d.contains_key(&id) {
+            return Err(anyhow!("{name} is already downloading"));
+        }
+        d.insert(id.clone(), cancel.clone());
+    }
     let url = format!(
         "https://huggingface.co/{repo}/resolve/main/{}?download=true",
         path.split('/').map(|s| urlencoding::encode(s).into_owned()).collect::<Vec<_>>().join("/")

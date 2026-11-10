@@ -139,10 +139,24 @@ pub struct SendOpts {
     pub research: bool,
 }
 
-fn register_cancel(state: &AppState, chat_id: &str) -> Arc<AtomicBool> {
+/// Marks the chat as busy. One reply (or compression) per chat at a time: a second one would replace
+/// the first one's stop flag (Stop no longer reaching it) and clear the busy mark when it ends.
+fn register_cancel(state: &AppState, chat_id: &str) -> Result<Arc<AtomicBool>> {
+    let mut g = state.generations.lock();
+    if g.contains_key(chat_id) {
+        return Err(anyhow!("This chat is still answering. Wait for the reply or stop it first."));
+    }
     let c = Arc::new(AtomicBool::new(false));
-    state.generations.lock().insert(chat_id.to_string(), c.clone());
-    c
+    g.insert(chat_id.to_string(), c.clone());
+    Ok(c)
+}
+
+/// Shows an error that happened before a reply started (no model, chat busy…) in the chat.
+fn report<T>(app: &AppHandle, chat_id: &str, r: Result<T>) -> Result<T> {
+    if let Err(e) = &r {
+        emit(app, chat_id, "error", json!({"error": e.to_string()}));
+    }
+    r
 }
 
 pub fn stop(state: &AppState, chat_id: &str) {
@@ -165,12 +179,16 @@ pub fn stop_all(state: &AppState) {
 /// post-turn compression. Progress reaches the UI only through `chat-event`s.
 pub async fn send(app: AppHandle, opts: SendOpts) -> Result<()> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    if state.llm_url().is_none() {
-        return Err(anyhow!("No model is loaded yet. Open Models and load one."));
-    }
-    let chat = state.db.chat(&opts.chat_id)?.ok_or_else(|| anyhow!("chat not found"))?;
-    let project = state.db.chat_project(&chat)?;
-    let cancel = register_cancel(&state, &chat.id);
+    let start = (|| {
+        if state.llm_url().is_none() {
+            return Err(anyhow!("No model is loaded yet. Open Models and load one."));
+        }
+        let chat = state.db.chat(&opts.chat_id)?.ok_or_else(|| anyhow!("chat not found"))?;
+        let project = state.db.chat_project(&chat)?;
+        let cancel = register_cancel(&state, &chat.id)?;
+        Ok((chat, project, cancel))
+    })();
+    let (chat, project, cancel) = report(&app, &opts.chat_id, start)?;
     emit(&app, &chat.id, "busy", json!({"busy": true}));
 
     let result = async {
@@ -286,11 +304,19 @@ pub fn quick_title(text: &str) -> Option<String> {
 
 pub async fn regenerate(app: AppHandle, chat_id: String, think: bool, web: bool) -> Result<()> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let msgs = state.db.messages(&chat_id)?;
-    let last_user = msgs.iter().rev().find(|m| m.role == "user").ok_or_else(|| anyhow!("nothing to regenerate"))?;
-    let research = last_user.meta["research"].as_bool().unwrap_or(false);
-    let text = last_user.content.clone();
-    state.db.truncate_from(&chat_id, last_user.seq)?;
+    let prepared = (|| {
+        // (checked before the answer is deleted: send would refuse a busy chat only afterwards)
+        if state.generations.lock().contains_key(&chat_id) {
+            return Err(anyhow!("This chat is still answering. Wait for the reply or stop it first."));
+        }
+        let msgs = state.db.messages(&chat_id)?;
+        let last_user = msgs.iter().rev().find(|m| m.role == "user").ok_or_else(|| anyhow!("nothing to regenerate"))?;
+        let research = last_user.meta["research"].as_bool().unwrap_or(false);
+        let text = last_user.content.clone();
+        state.db.truncate_from(&chat_id, last_user.seq)?;
+        Ok((text, research))
+    })();
+    let (text, research) = report(&app, &chat_id, prepared)?;
     send(app, SendOpts { chat_id, text, think, web, research }).await
 }
 
@@ -796,7 +822,7 @@ pub fn export_markdown(chat: &Chat, messages: &[Message]) -> String {
 /// Manual compression triggered from the UI.
 pub async fn compress_now(app: AppHandle, chat_id: String) -> Result<()> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let cancel = register_cancel(&state, &chat_id);
+    let cancel = register_cancel(&state, &chat_id)?;
     emit(&app, &chat_id, "busy", json!({"busy": true}));
     let r = compress(&app, &chat_id, &cancel).await;
     state.generations.lock().remove(&chat_id);

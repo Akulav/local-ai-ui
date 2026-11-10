@@ -7,6 +7,27 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-11-10
+
+### Security
+- Git tools no longer run programs named in a project's own `.git/config`: `core.fsmonitor`, clean/smudge filters
+  (Git LFS's standard commands stay on) and textconv drivers are switched off for `git_status` / `git_diff`.
+- Project file tools refuse paths that leave the project through a symlink or junction.
+- `fetch_url` opens addresses on this computer or the local network (localhost, 192.168.x.x, *.local…) only when
+  the user gave the link, also with Web on; allowed links are compared after resolving `..` and `user@` like the
+  request does.
+- The window has a Content-Security-Policy: no remote images in replies (a page could otherwise make the model leak
+  text through an image URL), scripts only from the app.
+- Opening a path from the UI is limited to folders; model downloads accept only `owner/name` repositories.
+
+### Fixed
+- A second reply in the same chat (double send, regenerate or edit while answering) is refused instead of taking
+  over the first one's Stop button; regenerate no longer deletes the answer first and then fails.
+- Errors before a reply starts ("No model is loaded yet", chat busy) are shown in the chat instead of vanishing;
+  regenerate errors are no longer shown twice.
+- Downloading the same model twice at once is refused (both wrote into one `.part` file).
+- `fetch_url` stops reading at 25 MB instead of loading the whole response into memory first.
+
 ## [0.14.0] - 2026-11-08
 
 ### Changed

@@ -571,7 +571,23 @@ pub struct GitCtx<'a> {
 async fn git(g: &GitCtx<'_>, args: &[&str]) -> Result<String> {
     let state = g.app.state::<Arc<AppState>>().inner().clone();
     let exe = git_exe().ok_or_else(|| anyhow!("git is not installed (looked in PATH, Git for Windows and GitHub Desktop)"))?;
-    let mut full: Vec<String> = ["--no-pager", "-c", "core.quotepath=off", "-c", "color.ui=never", "-c", "core.pager=cat"].iter().map(|s| s.to_string()).collect();
+    // A project's own .git/config can name programs that git status/diff would run (fsmonitor,
+    // clean/smudge filters, textconv): a downloaded repository must not run code when the user allows
+    // "git status". Those settings are switched off for every call.
+    let mut full: Vec<String> = [
+        "--no-pager", "-c", "core.quotepath=off", "-c", "color.ui=never", "-c", "core.pager=cat", "-c", "core.fsmonitor=false",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // (reading the config runs nothing)
+    let filters = run_process(&state.job, &exe, &["config".into(), "--get-regexp".into(), r"^filter\.".into()], None, Path::new(g.folder), Duration::from_secs(20), g.cancel).await?;
+    for f in filter_drivers(&filters.output) {
+        for (k, v) in [("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")] {
+            full.push("-c".into());
+            full.push(format!("filter.{f}.{k}={v}"));
+        }
+    }
     full.extend(args.iter().map(|s| s.to_string()));
     let o = run_process(&state.job, &exe, &full, None, Path::new(g.folder), Duration::from_secs(60), g.cancel).await?;
     if o.timed_out {
@@ -584,6 +600,24 @@ async fn git(g: &GitCtx<'_>, args: &[&str]) -> Result<String> {
         return Err(anyhow!("git {} failed: {}", args.join(" "), o.output.trim()));
     }
     Ok(o.output)
+}
+
+/// Filter drivers to switch off, from `git config --get-regexp ^filter\.` output ("filter.<name>.<key>
+/// <value>" lines). Git LFS's own standard commands stay on (its repositories would look changed
+/// without them); anything else, or an "lfs" driver set to another program, is disabled.
+fn filter_drivers(config: &str) -> Vec<String> {
+    static LFS: OnceLock<Regex> = OnceLock::new();
+    let lfs = LFS.get_or_init(|| Regex::new(r"^git-lfs (clean|smudge|filter-process)( -- %f)?$").expect("lfs regex"));
+    let mut off: Vec<String> = Vec::new();
+    for line in config.lines() {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        let Some((name, k)) = key.strip_prefix("filter.").and_then(|r| r.rsplit_once('.')) else { continue };
+        let command = matches!(k.to_ascii_lowercase().as_str(), "clean" | "smudge" | "process");
+        if !name.is_empty() && command && !(name == "lfs" && lfs.is_match(value.trim())) && !off.iter().any(|n| n == name) {
+            off.push(name.to_string());
+        }
+    }
+    off
 }
 
 async fn ensure_repo(g: &GitCtx<'_>) -> Result<()> {
@@ -636,7 +670,8 @@ pub async fn git_diff(g: &GitCtx<'_>, a: &Value) -> Result<(String, Value)> {
         }
         None => ".".to_string(),
     };
-    let mut args: Vec<String> = vec!["diff".into(), "--no-ext-diff".into(), "--unified=3".into(), "-M".into()];
+    // (--no-textconv: a textconv driver in the repo's config would be a program to run)
+    let mut args: Vec<String> = vec!["diff".into(), "--no-ext-diff".into(), "--no-textconv".into(), "--unified=3".into(), "-M".into()];
     if staged {
         args.push("--staged".into());
     }
@@ -753,6 +788,15 @@ pub async fn run_command(g: &GitCtx<'_>, a: &Value) -> Result<(String, Value)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_filter_programs_are_switched_off() {
+        let cfg = "filter.lfs.clean git-lfs clean -- %f\nfilter.lfs.smudge git-lfs smudge -- %f\nfilter.lfs.process git-lfs filter-process\nfilter.lfs.required true\n\
+                   filter.evil.clean powershell -c calc\nfilter.a.b.smudge sh -c x\n";
+        assert_eq!(filter_drivers(cfg), ["evil", "a.b"]);
+        assert_eq!(filter_drivers("filter.lfs.clean curl x | sh\n"), ["lfs"], "an lfs driver running something else is off too");
+        assert!(filter_drivers("").is_empty());
+    }
 
     #[test]
     fn definitions_are_recognised() {
