@@ -54,6 +54,27 @@ pub struct Message {
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
         let c = Connection::open(path)?;
+        c.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Several connections setting up the same database at once (the tests, each with its own AppState)
+        // can get SQLITE_BUSY right away – switching a new file to WAL, or a lock upgrade SQLite refuses
+        // instead of waiting (deadlock avoidance) – so the setup is retried for a while.
+        let mut tries = 0;
+        loop {
+            match Self::setup(&c) {
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if tries < 100
+                        && matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) =>
+                {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                r => break r?,
+            }
+        }
+        Ok(Db(Mutex::new(c)))
+    }
+
+    fn setup(c: &Connection) -> rusqlite::Result<()> {
         c.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
@@ -91,7 +112,7 @@ impl Db {
             "UPDATE messages SET meta=REPLACE(meta,'\"state\":\"running\"','\"state\":\"cancelled\"') WHERE role='event' AND meta LIKE '%\"state\":\"running\"%'",
             [],
         )?;
-        Ok(Db(Mutex::new(c)))
+        Ok(())
     }
 
     // ---------- projects ----------

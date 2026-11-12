@@ -7,6 +7,12 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-12
+
+### Fixed
+- Opening the database waits and retries when another connection is setting it up at the same moment instead of
+  failing with "database is locked" (made the Linux CI tests fail now and then on a fresh test folder).
+
 ## [0.15.0] - 2026-11-12
 
 ### Changed

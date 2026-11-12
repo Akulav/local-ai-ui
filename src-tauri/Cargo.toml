@@ -1,7 +1,7 @@
 [package]
 name = "lumen"
 # keep in sync with package.json (scripts/bump-version.ps1 does it for you)
-version = "0.15.0"
+version = "0.15.1"
 description = "Lumen - hassle-free local AI"
 authors = ["Akulav"]
 edition = "2021"
