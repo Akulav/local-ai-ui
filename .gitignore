@@ -37,3 +37,5 @@ desktop.ini
 
 # ---- Claude Code local settings (CLAUDE.md is committed) ----
 .claude/settings.local.json
+# graphify knowledge graph (local, rebuilt with `graphify update .`)
+graphify-out/
