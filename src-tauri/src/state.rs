@@ -14,9 +14,10 @@ use crate::server::ServerProc;
 use crate::updater::UpdateInfo;
 use crate::platform::Job;
 
-/// Where everything lives: `LumenData` next to the program (Windows install folder, the Linux install in
-/// ~/.local/share/lumen, a portable copy), else the user's app-data folder. macOS always uses
-/// ~/Library/Application Support/Lumen: an app bundle must not be written into.
+/// Where everything lives: `LumenData` in the folder Lumen is installed in – next to the program
+/// (Windows, Linux, a portable copy) or, on macOS, next to `Lumen.app` (never inside the bundle). Only
+/// when that folder can't be written to (or for a pre-0.15 `Lumen.app` sitting straight in an
+/// Applications folder) the user's app-data folder is used.
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub root: PathBuf,
@@ -29,21 +30,43 @@ pub struct Paths {
 
 impl Paths {
     pub fn resolve() -> Self {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let root = if cfg!(target_os = "macos") {
-            user_data_dir().unwrap_or_else(|| exe_dir.join("LumenData"))
-        } else {
-            let beside = exe_dir.join("LumenData");
-            if std::fs::create_dir_all(&beside).is_ok() && writable(&beside) {
-                beside
-            } else {
-                user_data_dir().unwrap_or(beside)
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lumen"));
+        let exe_dir = exe.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        // macOS: <folder>/Lumen.app/Contents/MacOS/lumen → <folder>
+        let bundle = crate::updater::app_bundle(&exe).filter(|_| cfg!(target_os = "macos"));
+        let folder = match bundle.as_ref().and_then(|b| b.parent()) {
+            Some(p) => p.to_path_buf(),
+            None => exe_dir.clone(),
+        };
+        let legacy_bundle = bundle.is_some() && folder.file_name().is_some_and(|n| n == "Applications");
+        let beside = folder.join("LumenData");
+        let root = if legacy_bundle {
+            user_data_dir().unwrap_or(beside)
+        } else if std::fs::create_dir_all(&beside).is_ok() && writable(&beside) {
+            // macOS before 0.15 kept the data in ~/Library/Application Support/Lumen: it moves along
+            if bundle.is_some() && !beside.join("data").exists() {
+                if let Some(old) = user_data_dir().filter(|d| d.join("data").is_dir()) {
+                    let _ = move_dir_contents(&old, &beside);
+                }
             }
+            beside
+        } else {
+            user_data_dir().unwrap_or(beside)
         };
         let _ = std::fs::create_dir_all(&root);
+        // The webview's own data, kept by Tauri in <local app data>/com.akulav.lumen before 0.15.
+        let web = root.join("webview");
+        if !web.exists() {
+            let local = if cfg!(windows) {
+                std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+            } else {
+                user_data_dir().and_then(|d| d.parent().map(Path::to_path_buf))
+            };
+            if let Some(old) = local.map(|l| l.join("com.akulav.lumen")).filter(|o| o.is_dir()) {
+                let _ = move_dir_contents(&old, &web);
+                let _ = std::fs::remove_dir(&old);
+            }
+        }
         let p = Paths {
             runtime: root.join("runtime"),
             models: root.join("models"),
@@ -71,6 +94,40 @@ pub fn user_data_dir() -> Option<PathBuf> {
     }
     let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local").join("share"));
     Some(data.join("lumen"))
+}
+
+/// Move everything in `from` into `to` (rename, or copy + delete across drives); entries already in `to` stay
+/// where they are.
+pub fn move_dir_contents(from: &Path, to: &Path) -> std::io::Result<()> {
+    fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+        if src.is_dir() {
+            std::fs::create_dir_all(dst)?;
+            for e in std::fs::read_dir(src)? {
+                let e = e?;
+                copy_tree(&e.path(), &dst.join(e.file_name()))?;
+            }
+            Ok(())
+        } else {
+            std::fs::copy(src, dst).map(|_| ())
+        }
+    }
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if dst.exists() {
+            continue;
+        }
+        if std::fs::rename(&src, &dst).is_err() {
+            if let Err(err) = copy_tree(&src, &dst) {
+                let _ = if dst.is_dir() { std::fs::remove_dir_all(&dst) } else { std::fs::remove_file(&dst) };
+                return Err(err);
+            }
+            let _ = if src.is_dir() { std::fs::remove_dir_all(&src) } else { std::fs::remove_file(&src) };
+        }
+    }
+    let _ = std::fs::remove_dir(from);
+    Ok(())
 }
 
 fn writable(dir: &Path) -> bool {

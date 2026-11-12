@@ -186,6 +186,13 @@ fn main() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            // The window is created here (not from tauri.conf.json) so the webview keeps its own data
+            // (cache, local storage) in LumenData too, not in the OS's app-data folder.
+            // (macOS's WKWebView always uses ~/Library/WebKit.)
+            if let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() {
+                let dir = handle.state::<Arc<AppState>>().paths.root.join("webview");
+                tauri::WebviewWindowBuilder::from_config(&handle, &cfg)?.data_directory(dir).build()?;
+            }
             {
                 let st = handle.state::<Arc<AppState>>();
                 updater::cleanup(&st);

@@ -7,6 +7,18 @@ pushed to `main`, GitHub Actions tags, builds and publishes the release.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-12
+
+### Changed
+- **Everything lives in the folder you install Lumen to**: models, chats, settings, the engine and now also the
+  window's own browser data (`LumenData/webview`) go to `LumenData` next to the program, never to `%LOCALAPPDATA%` or
+  `~/.local/share`. Install on `D:\` and your models go to `D:\` too.
+- Linux and macOS: the first start asks where to install with the system's folder picker (default
+  `~/.local/share/lumen` or `~/Applications/Lumen`; `--install-dir <folder>` skips the question). The folder is
+  remembered, so a newer download updates that copy. On macOS the data now sits next to `Lumen.app` instead of in
+  `~/Library/Application Support/Lumen`; an older `Lumen.app` and its data move into the new folder.
+- New README in the same style as the other Akulav apps.
+
 ## [0.14.1] - 2026-11-10
 
 ### Security

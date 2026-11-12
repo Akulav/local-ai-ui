@@ -61,12 +61,17 @@ The owner wants every change to ship as a release. For **every** change set (fea
   `.iss`/`.isl` are UTF-8 **with BOM** (Inno needs it for ă/ș/ț). Test builds use `/DName=… /DGuid=… /DNsisKeyName=…`
   so a test install never touches the real one; the uninstaller may be `unins001.exe` after an update – read
   `UninstallString` from the registry.
-- **Linux** (`install.rs`): the downloaded program copies itself to `~/.local/share/lumen/lumen`, writes
+- **Linux** (`install.rs`): the downloaded program asks for an install folder (zenity/kdialog; `--install-dir`;
+  default `~/.local/share/lumen`, remembered in `~/.config/lumen/install-dir`), copies itself to `<folder>/lumen`, writes
   `lumen.desktop` (app menu + Desktop) and starts that copy; `--here`, `--uninstall [--delete-data]`, `--version`.
-- **macOS** (`install.rs`): the downloaded program, started outside a bundle, builds `~/Applications/Lumen.app`
-  around a copy of itself (`src-tauri/installer/Info.plist` compiled in, icon.icns, quarantine removed, ad-hoc
-  `codesign`) and `open`s it; an existing `/Applications/Lumen.app` (old dmg installs) is updated instead. `--here`,
-  `--uninstall [--delete-data]`. Data always in `~/Library/Application Support/Lumen` (never write into the bundle).
+- **macOS** (`install.rs`): the downloaded program, started outside a bundle, asks for a folder (Finder; default
+  `~/Applications/Lumen`) and builds `<folder>/Lumen.app` around a copy of itself (`src-tauri/installer/Info.plist` compiled in, icon.icns, quarantine removed, ad-hoc
+  `codesign`) and `open`s it; a pre-0.15 `~/Applications/Lumen.app` / `/Applications/Lumen.app` moves into the new
+  layout with its data. `--here`, `--uninstall [--delete-data]`.
+- **Everything lives in the install folder** (owner's rule, like akulav-mc-launcher): `Paths::resolve` → `LumenData`
+  next to the program (macOS: next to Lumen.app, never inside it), including the webview's data (`LumenData/webview`,
+  set on the window in `main.rs`; macOS WKWebView can't be moved). The OS app-data folder only when that folder isn't
+  writable or for a pre-0.15 bundle straight in an Applications folder.
 - Linux/macOS: `--after-update` (the updater's relaunch) runs in place like `--here`.
 - **Updater** (`updater.rs`): checks 20 s after start + every 6 h (setting `check_updates`) and on demand; also offers
   newer llama.cpp builds. Install = download → SHA-256 against the release's `SHA256SUMS.txt` → Windows: start the setup
